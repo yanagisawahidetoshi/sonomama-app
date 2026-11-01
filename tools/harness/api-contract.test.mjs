@@ -1,11 +1,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { git } from './workspace.mjs';
 import { readFile } from 'node:fs/promises';
 import { checkApiContract, checkRailsRoutes } from './api-contract.mjs';
+import { fixture, update, commitFixture, runFixture } from './test-fixture.mjs';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 const schema = (paths, openapi = '3.1.0') => JSON.stringify({ openapi, info: { title: 'SONOMAMA', version: '0.1.0' }, paths });
 const lessons = { '/lessons': { get: { operationId: 'listLessons', responses: { 200: { description: 'OK' } } } } };
@@ -188,5 +191,51 @@ describe('API contract verifier', () => {
       const [first] = config.verifiers.find(v => v.id === 'rails').commands;
       assert.deepEqual(first, ['node', '../../tools/harness/api-contract.mjs', '--routes']);
     });
+  });
+  // #251 made the repository carry a contract; a run (harness:demo) checks it in a workspace that may have no origin/main,
+  // as a CI job that checks out one SHA does. The run's baseline is what the change is compared with.
+  describe('given a Harness run that verifies the API contract', () => {
+    const repositoryContract = new URL('../../packages/api-schema/openapi.yaml', import.meta.url);
+    const prepare = async root => {
+      // The run workspace lies inside the repository and resolves the Harness dependencies (yaml) from its node_modules, as a checkout does.
+      await symlink(fileURLToPath(new URL('../../node_modules', import.meta.url)), join(root, 'node_modules')).catch(error => { if (error.code !== 'EEXIST') throw error; });
+      await writeFile(join(root, 'packages/api-schema/openapi.yaml'), await readFile(repositoryContract, 'utf8'));
+      await update(root, '.harness/state/sample-sbi.json', s => { s.requiredVerifiers = ['api-contract']; });
+      // The Prism Mock check is covered by its own tests; only the contract comparison is under test here.
+      await update(root, '.harness/config/harness.json', c => { c.verifiers.find(v => v.id === 'api-contract').commands = [['node', '../../tools/harness/api-contract.mjs']]; });
+    };
+    const contractCheck = async (root, run) => JSON.parse(await readFile(join(root, run.runDir, 'iteration-1/result.json'), 'utf8')).verification.checks.find(c => c.id === 'api-contract');
+    const output = check => check.processes.map(p => `${p.stdout}${p.stderr}`).join('');
+
+    it('when the repository has no origin/main then compares the contract with the run baseline and passes', () => fixture(async root => {
+      await prepare(root);
+      const run = await runFixture({ root, quiet: true });
+      const check = await contractCheck(root, run);
+      assert.equal(check.status, 'PASS', output(check));
+      assert.match(output(check), new RegExp(`API contract \\(base ${run.baselineSha}\\): PASS`));
+    }));
+
+    it('when origin/main holds an operation the baseline already removed then still compares with the baseline and reports no breaking change', () => fixture(async root => {
+      const document = parseYaml(await readFile(repositoryContract, 'utf8'));
+      document.paths['/api/v1/retired'] = { get: { operationId: 'getRetired', responses: { 200: { description: 'OK' } } } };
+      await writeFile(join(root, 'packages/api-schema/openapi.yaml'), stringifyYaml(document));
+      await commitFixture(root);
+      await git(root, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+      await prepare(root);
+      const run = await runFixture({ root, quiet: true });
+      const check = await contractCheck(root, run);
+      assert.equal(check.status, 'PASS', output(check));
+      assert.doesNotMatch(output(check), /BREAKING/);
+    }));
+
+    it('when the run has verified the contract then the Harness process keeps its own HARNESS_BASE_REF', () => fixture(async root => {
+      const previous = process.env.HARNESS_BASE_REF;
+      process.env.HARNESS_BASE_REF = 'harness-own-base';
+      try {
+        await prepare(root);
+        await runFixture({ root, quiet: true });
+        assert.equal(process.env.HARNESS_BASE_REF, 'harness-own-base');
+      } finally { if (previous === undefined) delete process.env.HARNESS_BASE_REF; else process.env.HARNESS_BASE_REF = previous; }
+    }));
   });
 });
