@@ -16,7 +16,7 @@ export function verifierRegistry(config) {
   ]);
 }
 // only limits the run to the named verifiers; selected maps an Impact Analysis selection to whether it is mandatory.
-export async function verify({ root, workspace, config, sbi, files = sbi.allowedFiles?.map(path=>({path})) ?? [], requiredVerifiers = [], full = false, lane = classifyLane(files,sbi), only = null, selected = new Map(), acceptanceRunner = runGeneratedAcceptance, generatedSpecDigest = null, generatedSpecError = null }) {
+export async function verify({ root, workspace, config, sbi, files = sbi.allowedFiles?.map(path=>({path})) ?? [], requiredVerifiers = [], full = false, lane = classifyLane(files,sbi), only = null, selected = new Map(), acceptanceRunner = runGeneratedAcceptance, generatedSpecDigest = null, generatedSpecError = null, baseRef = null }) {
   const registry = new Map([...verifierRegistry(config)].filter(([id]) => !only || only.has(id)));
   // A run generates its Trusted Acceptance in the workspace (#147), so the root config does not know it yet; the workspace registration does.
   for (const id of new Set(sbi.acceptanceCriteria.map(a => a.verifier))) {
@@ -97,7 +97,7 @@ export async function verify({ root, workspace, config, sbi, files = sbi.allowed
         }
         commands.push(command);
       }
-      const {status,reason,failure,phases,processes}=await runIsolated({workspace,adapter,config,cwd,commands});
+      const {status,reason,failure,phases,processes}=await runIsolated({workspace,adapter,config,cwd,base:baseRef,commands});
       checks.push({...base,required:true,status,...(reason&&{reason}),...(failure&&{failure}),...(phases&&{phases}),cwd,isolation:adapter.isolation||'container',processes,skippedCommands});
     }
   }

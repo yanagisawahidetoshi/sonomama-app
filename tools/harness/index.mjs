@@ -159,7 +159,7 @@ async function verifyHead({ root, summary, inputs, result, iterDir, iteration, r
     sbi:{...sbi,requiredVerifiers:sbi.requiredVerifiers.filter(id=>!securityIds.has(id) || generalIds.has(id))}, files,
     lane:summary.lane, full:summary.fullVerification,
     requiredVerifiers:summary.securityAssessment.requiredVerifiers.filter(id=>generalIds.has(id)),
-    acceptanceRunner: inputs.acceptanceRunner, generatedSpecDigest: summary.acceptance?.specDigest }));
+    acceptanceRunner: inputs.acceptanceRunner, generatedSpecDigest: summary.acceptance?.specDigest, baseRef: summary.baselineSha }));
   await json(join(iterDir,'verifier-selection.json'),result.verification.checks.map(({id,selectionReasons,required,status})=>({id,selectionReasons,required,status})));
   // #246 N1: the preflight announces and decides the gate; the completion requires the verifiers the actual diff needs, as CI does.
   // Rules, level and approvals still never go below what the preflight found.

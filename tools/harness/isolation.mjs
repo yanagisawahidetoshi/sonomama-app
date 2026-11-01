@@ -17,7 +17,8 @@ const pick = names => Object.fromEntries(names.filter(k => process.env[k] !== un
 // DOCKER_CONFIG replaces HOME so the CLI still finds its context (Docker Desktop) and plugins.
 export const dockerCliEnv = () => ({ DOCKER_CONFIG: join(homedir(), '.docker'), ...pick(['PATH', 'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY']) });
 // Harness-owned scripts (isolation: harness) parse untrusted files without executing them.
-const harnessEnv = () => pick(['PATH', 'HARNESS_BASE_REF']);
+// A run passes its baseline as the base; the Harness process environment is never changed for it.
+const harnessEnv = base => ({ ...pick(['PATH', 'HARNESS_BASE_REF']), ...(base ? { HARNESS_BASE_REF: base } : {}) });
 // Trust state, evidence and Git metadata stay hidden even when the workspace is the repository root (harness:verify, CI).
 const protectedPaths = ['.git', '.harness/state', '.harness/runs', '.harness/exports'];
 // The docker error is kept for diagnosis; evidence is redacted when it is written.
@@ -59,11 +60,11 @@ const inside = (parent, path) => { const rel = relative(parent, path); return re
 
 // commands is the selection the caller made (gated commands removed); it defaults to every configured command.
 // The verifier's own limits win over the configuration's; a setup limit falls back to the verification limit.
-export async function runIsolated({ workspace, adapter, config, cwd, commands = adapter.commands, setup = adapter.setupCommands ?? [] }) {
+export async function runIsolated({ workspace, adapter, config, cwd, base, commands = adapter.commands, setup = adapter.setupCommands ?? [] }) {
   const docker = config.isolation?.docker || 'docker', timeoutMs = adapter.timeoutMs ?? config.timeoutMs;
   const limits = { setup: adapter.setupTimeoutMs ?? config.setupTimeoutMs ?? timeoutMs, verify: timeoutMs };
   const mode = adapter.isolation || 'container';
-  if (mode === 'harness') return phased({ setup, commands, limits, run: ([command, ...args], limit) => execute(command, args, { cwd, timeoutMs: limit, env: harnessEnv() }) });
+  if (mode === 'harness') return phased({ setup, commands, limits, run: ([command, ...args], limit) => execute(command, args, { cwd, timeoutMs: limit, env: harnessEnv(base) }) });
   // Fail closed: without a reachable daemon nothing untrusted runs, and the check cannot pass.
   const ready = await execute(docker, ['info', '--format', '{{.ServerVersion}}'], { env: dockerCliEnv(), timeoutMs: 30000 });
   if (!ready.ok) return unavailable('docker is not available', ready);
