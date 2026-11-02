@@ -16,6 +16,7 @@
   "verifiers": [
     {
       "id": "rails",
+      "timeoutMs": 300000,
       "directory": "apps/api",
       "marker": "Gemfile",
       "planned": [
@@ -755,6 +756,7 @@
   "securityVerifiers": [
     {
       "id": "migration-safety",
+      "timeoutMs": 300000,
       "directory": ".",
       "commands": [
         [
@@ -853,6 +855,7 @@
     },
     {
       "id": "rails-authz-test",
+      "timeoutMs": 300000,
       "directory": ".",
       "commands": [
         [
@@ -913,6 +916,7 @@
     },
     {
       "id": "authn-test",
+      "timeoutMs": 300000,
       "directory": ".",
       "commands": [
         [
@@ -974,6 +978,7 @@
     },
     {
       "id": "rails-rls-test",
+      "timeoutMs": 300000,
       "directory": ".",
       "commands": [
         [
@@ -1035,6 +1040,7 @@
     },
     {
       "id": "data-lifecycle-test",
+      "timeoutMs": 300000,
       "directory": ".",
       "commands": [
         [
