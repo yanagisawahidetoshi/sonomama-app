@@ -129,13 +129,10 @@ describe('API Docs Server', () => {
       started.then(docs => docs.server.close(), () => {});
       await assert.rejects(started, pattern);
     };
-    // main tracks the OpenAPI of the health check (SBI #232), so the fixture removes it to stand for a repository without one.
     it('when packages/api-schema/openapi.yaml does not exist then refuses and names the file', () => fixture(async root => {
-      await rm(join(root, docsSchemaPath));
       await refused(root, /packages\/api-schema\/openapi\.yaml/);
     }));
     it('when the Source of Truth is openapi.json instead of openapi.yaml then refuses', () => fixture(async root => {
-      await rm(join(root, docsSchemaPath));
       await writeFile(join(root, 'packages/api-schema/openapi.json'), JSON.stringify({ openapi: '3.1.0', info: { title: 'SONOMAMA API', version: '0.1.0' }, paths: {} }));
       await refused(root, /packages\/api-schema\/openapi\.yaml/);
     }));
@@ -159,7 +156,6 @@ describe('API Docs Server', () => {
         const served = await get(docs.server, '/openapi.yaml');
         assert.equal(served.status, 422);
         assert.doesNotMatch(served.body, /openapi: 3\.1/);
-        await rm(join(root, docsSchemaPath));
         assert.equal((await get(docs.server, '/openapi.yaml')).status, 422);
       });
     }));

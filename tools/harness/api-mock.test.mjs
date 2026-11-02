@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFile, writeFile, readFile, rm } from 'node:fs/promises';
+import { copyFile, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
@@ -60,13 +60,10 @@ describe('API Mock Server', () => {
   });
 
   describe('given a Source of Truth that cannot be served', () => {
-    // main tracks the OpenAPI of the health check (SBI #232), so the fixture removes it to stand for a repository without one.
     it('when packages/api-schema/openapi.yaml does not exist then refuses and names it', () => fixture(async root => {
-      await rm(join(root, mockSchemaPath));
       await refused(root, /packages\/api-schema\/openapi\.yaml/);
     }));
     it('when the Source of Truth is openapi.json instead of openapi.yaml then refuses', () => fixture(async root => {
-      await rm(join(root, mockSchemaPath));
       await writeFile(join(root, 'packages/api-schema/openapi.json'), JSON.stringify(parseYaml(await readFile(profileContract, 'utf8'))));
       await refused(root, /packages\/api-schema\/openapi\.yaml/);
     }));
