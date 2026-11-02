@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 
 // #268: a fixture directory names the process that owns it, so a later test process can tell what a killed or timed out
 // process left behind. Only these names are swept; a directory without an owner, or with a live one, is never touched.
+// A reused PID keeps an old fixture as if it were live; the sweep prefers leaving a stale fixture to removing one in use.
 export const fixturePrefix = (kind, pid = process.pid) => `sonomama-${kind}-${pid}-`;
 const owned = /^sonomama-(?:risk|fixture-template)-(\d+)-[^/]+$/;
 function alive(pid) {

@@ -100,6 +100,8 @@ jobs:
       - run: pnpm harness:test
         env:
           HARNESS_TEST_SHARD: ${{ matrix.shard }}/3
+          # #268: chosen for the runner, independent of the local default in package.json.
+          HARNESS_TEST_CONCURRENCY: 3
   harness-demo:
     needs: impact
     if: needs.impact.outputs.full_gate == 'true'
