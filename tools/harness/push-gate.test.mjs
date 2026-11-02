@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { commitFixture, fixture } from './test-fixture.mjs';
 import { git } from './workspace.mjs';
-import { planPushGate, runPushGate } from './push-gate.mjs';
+import { fullGateEnv, planPushGate, runPushGate } from './push-gate.mjs';
 const exec=promisify(execFile);
 const root=new URL('../../',import.meta.url).pathname;
 // git hands the pushed refs to pre-push on stdin; the hook must read them before anything else consumes stdin.
@@ -231,5 +231,12 @@ describe('Push gate execution',()=>{
         assert.equal(await gone(workspace),false);
       } finally { await rm(join(workspace,'stray.txt')); await git(root,['worktree','remove',workspace]); await rmdir(join(workspace,'..')); }
     }));
+  });
+});
+
+// #261: at the node default (11 files at once on 12 cores) the Full Gate peaked at load 174 and took 650s; 3 at once took 626s at load 38.
+describe('Push gate Full Gate concurrency',()=>{
+  it('when the push gate runs the Full Gate then node runs at most 3 test files at once and the rest of the environment is kept',()=>{
+    assert.deepEqual(fullGateEnv({PATH:'/bin',HARNESS_BASE_REF:'origin/main'}),{PATH:'/bin',HARNESS_BASE_REF:'origin/main',HARNESS_TEST_CONCURRENCY:'3'});
   });
 });

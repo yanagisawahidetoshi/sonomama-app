@@ -660,6 +660,11 @@ describe('CI workflow setup', () => {
       assert.match(script, /^node --test \$\{HARNESS_TEST_SHARD:\+--test-shard=\$HARNESS_TEST_SHARD\} /);
       for (const glob of ['tools/harness/*.test.mjs', 'tools/harness/agents/*.test.mjs', '.harness/verification/*.test.mjs', '.harness/verification/lib/*.test.mjs']) assert.ok(script.includes(glob), glob);
     });
+    it('when harness:test runs with a concurrency then node runs at most that many test files at once, and without one it keeps the node default', async () => {
+      const script = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).scripts['harness:test'];
+      assert.ok(script.includes(' ${HARNESS_TEST_CONCURRENCY:+--test-concurrency=$HARNESS_TEST_CONCURRENCY} '));
+      assert.equal(job.steps.find(s => s.run === 'pnpm harness:test').env.HARNESS_TEST_CONCURRENCY, undefined);
+    });
   });
 
   // The self-repair demo was the longest job of a pull request run: every real application verifier ran a second time inside its run
