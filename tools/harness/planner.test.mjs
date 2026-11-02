@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fixture } from './test-fixture.mjs';
+import { fixture, update } from './test-fixture.mjs';
 import { githubMock } from './test-github.mjs';
 import { exists, readJson } from './io.mjs';
 import { parseIssueUrl, planIssue, renderCreatedList, sbiMarker, sbiDigest } from './planner.mjs';
@@ -167,6 +167,12 @@ describe('PBI → SBI Planner', () => {
       const used = [];
       await plan(root, { provider: undefined, agent: async ({ provider }) => { used.push(provider); return { sbis: validPlan(), escalation: null }; } });
       assert.deepEqual(used, ['claude']);
+    })));
+    it('when the configuration gives the provider its own limit then the Planner provider gets that limit, not the verifier limit', () => fixture(root => mockGitHub({}, async () => {
+      await update(root, '.harness/config/harness.json', c => { c.timeoutMs = 120000; c.providerTimeoutMs = 600000; });
+      const limits = [];
+      await plan(root, { agent: async ({ timeoutMs }) => { limits.push(timeoutMs); return { sbis: validPlan(), escalation: null }; } });
+      assert.deepEqual(limits, [600000]);
     })));
     it('when --provider codex is given then decomposes the PBI with Codex instead', () => fixture(root => mockGitHub({}, async () => {
       const used = [];

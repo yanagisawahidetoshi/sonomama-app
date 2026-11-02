@@ -5,6 +5,7 @@
   "maxConsecutiveFailures": 3,
   "maxIterations": 5,
   "timeoutMs": 120000,
+  "providerTimeoutMs": 600000,
   "setupTimeoutMs": 360000,
   "github": {
     "remote": "origin",

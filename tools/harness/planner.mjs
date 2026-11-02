@@ -4,7 +4,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { check } from './check.mjs';
 import { json, evidenceText } from './io.mjs';
 import { runAgent } from './agents/index.mjs';
-import { planResponseSchema, planJsonSchema } from './schemas.mjs';
+import { planResponseSchema, planJsonSchema, providerTimeoutMs } from './schemas.mjs';
 import { judgePlan, creationOrder, limits } from './planner-judge.mjs';
 import { githubCli } from './planner-github.mjs';
 import { withEvidenceProtection, redactText, hasSecret } from './evidence-protection.mjs';
@@ -93,7 +93,7 @@ async function planProtected({ root, issueUrl, provider, quiet, agent, github, s
     const securityCategories = [...new Set(securityPolicy.rules.flatMap(rule => rule.categories))];
     const prompt = await makePlanPrompt(root, pbi, securityCategories);
     await evidenceText(join(directory, 'prompt.txt'), prompt);
-    const response = planResponseSchema.parse(await agent({ provider, prompt, directory, workspace: root, timeoutMs: config.timeoutMs, schema: planJsonSchema }));
+    const response = planResponseSchema.parse(await agent({ provider, prompt, directory, workspace: root, timeoutMs: providerTimeoutMs(config), schema: planJsonSchema }));
     await json(join(directory, 'candidates.json'), response);
     if (response.escalation) throw new Error(`Planner escalation: ${response.escalation}`);
     summary.status = 'JUDGING'; await save();
