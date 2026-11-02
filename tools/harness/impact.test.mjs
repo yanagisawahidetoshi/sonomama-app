@@ -655,15 +655,22 @@ describe('CI workflow setup', () => {
       const step = job.steps.find(s => s.run === 'pnpm harness:test');
       assert.equal(step.env.HARNESS_TEST_SHARD, `\${{ matrix.shard }}/${shards.length}`);
     });
+    // #268: the runner concurrency is the CI's own decision, so a change of the local default does not silently change CI.
+    it('when a shard runs then its test file concurrency is set by the workflow, not inherited from the local default', () => {
+      const step = job.steps.find(s => s.run === 'pnpm harness:test');
+      assert.match(String(step.env.HARNESS_TEST_CONCURRENCY), /^[1-9]\d*$/);
+    });
     it('when harness:test runs with a shard then node runs only that shard of the full file list, and without one it runs everything', async () => {
       const script = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).scripts['harness:test'];
       assert.match(script, /^node --test \$\{HARNESS_TEST_SHARD:\+--test-shard=\$HARNESS_TEST_SHARD\} /);
       for (const glob of ['tools/harness/*.test.mjs', 'tools/harness/agents/*.test.mjs', '.harness/verification/*.test.mjs', '.harness/verification/lib/*.test.mjs']) assert.ok(script.includes(glob), glob);
     });
-    it('when harness:test runs with a concurrency then node runs at most that many test files at once, and without one it keeps the node default', async () => {
+    // #268: node defaults to one test file per core but one, and each file makes fixtures, Git worktrees and runs; a single
+    // harness:test overloaded a 12 core machine. The default is a measured safe value that does not grow with the core count.
+    it('when harness:test runs then the test file concurrency is explicit, at most 4 by default and overridable', async () => {
       const script = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).scripts['harness:test'];
-      assert.ok(script.includes(' ${HARNESS_TEST_CONCURRENCY:+--test-concurrency=$HARNESS_TEST_CONCURRENCY} '));
-      assert.equal(job.steps.find(s => s.run === 'pnpm harness:test').env.HARNESS_TEST_CONCURRENCY, undefined);
+      const [, value] = script.match(/ --test-concurrency=\$\{HARNESS_TEST_CONCURRENCY:-(\d+)\} /) ?? [];
+      assert.ok(Number(value) >= 1 && Number(value) <= 4, script);
     });
   });
 

@@ -5,12 +5,17 @@ import { tmpdir } from 'node:os';
 import { git } from './workspace.mjs';
 import { execute } from './io.mjs';
 import { runHarness } from './index.mjs';
+import { fixturePrefix, sweepStaleFixtures } from './fixture-sweep.mjs';
 const source = new URL('../../', import.meta.url).pathname;
 // #197: the fixture inputs are copied, git-initialized and committed once per test process; each fixture is a copy of that template
 // (working tree and .git), so it starts as the same clean repository without repeating the copy and the commit.
 let template;
+const cloneFlags = process.platform === 'darwin' ? ['-c'] : process.platform === 'linux' ? ['--reflink=auto'] : [];
 async function makeTemplate() {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'sonomama-fixture-template-')));
+  // #268: once per test process, remove the fixtures of test processes that were killed before their cleanup ran.
+  const worktrees = (await git(source, ['worktree', 'list', '--porcelain'])).stdout.split('\n').filter(line => line.startsWith('worktree ')).map(line => line.slice(9));
+  await sweepStaleFixtures({ worktrees });
+  const root = await realpath(await mkdtemp(join(tmpdir(), fixturePrefix('fixture-template'))));
   process.once('exit', () => rmSync(root, { recursive: true, force: true }));
   const ignored = (await git(source, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '--', 'apps', 'prototypes', 'packages'])).stdout
     .split('\n').filter(Boolean).map(path => join(source, path.replace(/\/$/, '')));
@@ -51,10 +56,11 @@ export async function prepareImage(image, { run = execute, attempts = 3, waitMs 
 export async function fixture(fn) {
   template ??= makeTemplate();
   const from = await template;
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'sonomama-risk-')));
+  const root = await realpath(await mkdtemp(join(tmpdir(), fixturePrefix('risk'))));
   try {
-    // The native cp is several times faster than fs.cp for the many small files of the template.
-    const copied = await execute('cp', ['-pR', `${from}/.`, root]);
+    // The native cp is several times faster than fs.cp for the many small files of the template. #268: a copy-on-write clone
+    // (APFS clonefile, reflink on Linux) shares the file data with the template instead of writing it again for every test.
+    const copied = await execute('cp', [...cloneFlags, '-pR', `${from}/.`, root]);
     if (!copied.ok) throw infrastructureFailure('fixture copy', copied);
     await fn(root);
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 5 }); }
