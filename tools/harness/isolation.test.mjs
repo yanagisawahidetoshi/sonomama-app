@@ -316,6 +316,14 @@ describe('Verifier isolation', () => {
       config.verifiers.find(v => v.id === 'rails').commands.push(['bundle', 'exec', 'rspec']);
       assert.throws(() => configSchema.parse(config));
     });
+    it('when a verifier boots Rails through Docker Compose then it has 300s to verify, while every other verifier keeps the 120s default and the setup limit', async () => {
+      const config = configSchema.parse(await base());
+      const rails = ['authn-test', 'data-lifecycle-test', 'migration-safety', 'rails', 'rails-authz-test', 'rails-rls-test'];
+      const longer = [...config.verifiers, ...config.securityVerifiers].filter(v => (v.timeoutMs ?? config.timeoutMs) !== 120000);
+      assert.deepEqual(longer.map(v => [v.id, v.timeoutMs]).sort(), rails.map(id => [id, 300000]));
+      assert.deepEqual({ timeoutMs: config.timeoutMs, setupTimeoutMs: config.setupTimeoutMs }, { timeoutMs: 120000, setupTimeoutMs: 360000 });
+      assert.ok([...config.verifiers, ...config.securityVerifiers].every(v => v.setupTimeoutMs === undefined));
+    });
   });
 
   describe('given a run workspace whose node_modules is only an empty container mount point', () => {
