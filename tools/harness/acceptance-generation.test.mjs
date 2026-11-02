@@ -105,6 +105,12 @@ describe('Generating Trusted Acceptance from an approved spec', () => {
     assert.match(seen.prompt, /apps\/api\/spec\/acceptance\/sbi_7\//);
     assert.deepEqual(Object.keys(seen).sort(), ['prompt', 'schema']);
   }));
+  it('when the agent is asked to generate then it is told not to name a local variable or block parameter after a credential, which the secret scan would stop', () => workspace(async root => {
+    let seen;
+    await generate(root, answer(), { agent: async request => { seen = request; return answer(); } });
+    const rule = seen.prompt.split('\n').find(line => line.includes('ローカル変数'));
+    for (const name of ['token', 'secret', 'password', 'credential', 'authorization', 'api_key', 'access_key']) assert.match(rule ?? '', new RegExp(name));
+  }));
 });
 
 describe('Generating Trusted Acceptance safely', () => {
