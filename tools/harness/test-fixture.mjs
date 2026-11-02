@@ -36,6 +36,23 @@ async function makeTemplate() {
   await git(root, ['repack', '-a', '-d', '-q']);
   return root;
 }
+// #261: a setup step that fails because of the machine or the network says so, with its cause, instead of reading as a code failure.
+export function infrastructureFailure(what, result) {
+  const cause = result.timedOut ? `timed out after ${result.durationMs}ms` : result.stderr.trim() || result.error || `exit ${result.code}`;
+  return new Error(`[infrastructure] ${what}: ${cause}`);
+}
+// A base image is pulled once, with retries, before the tests that build on it, so a registry hiccup does not fail a test midway.
+export async function prepareImage(image, { run = execute, attempts = 3, waitMs = 5000 } = {}) {
+  if (!(await run('docker', ['info'], { timeoutMs: 30000 })).ok) return;
+  if ((await run('docker', ['image', 'inspect', image], { timeoutMs: 30000 })).ok) return;
+  let pulled;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt) await new Promise(resolve => setTimeout(resolve, waitMs * attempt));
+    pulled = await run('docker', ['pull', image], { timeoutMs: 300000 });
+    if (pulled.ok) return;
+  }
+  throw infrastructureFailure(`docker pull ${image}`, pulled);
+}
 export async function fixture(fn) {
   template ??= makeTemplate();
   const from = await template;
@@ -44,7 +61,7 @@ export async function fixture(fn) {
     // The native cp is several times faster than fs.cp for the many small files of the template. #268: a copy-on-write clone
     // (APFS clonefile, reflink on Linux) shares the file data with the template instead of writing it again for every test.
     const copied = await execute('cp', [...cloneFlags, '-pR', `${from}/.`, root]);
-    if (!copied.ok) throw new Error(`fixture copy failed: ${copied.stderr || copied.error}`);
+    if (!copied.ok) throw infrastructureFailure('fixture copy', copied);
     await fn(root);
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 5 }); }
 }

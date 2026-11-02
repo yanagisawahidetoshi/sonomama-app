@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fixture } from './test-fixture.mjs';
+import { fixture, infrastructureFailure, prepareImage } from './test-fixture.mjs';
 import { git } from './workspace.mjs';
 
 // #197: fixtures are copied from a template made once per test process; each one must still be a fresh, independent repository.
@@ -48,5 +48,50 @@ describe('Test fixture repository', () => {
     assert.equal(existsSync(root), true);
     assert.equal(await exit(node('await fixture(async () => {});')), 0);
     assert.equal(existsSync(root), false);
+  });
+});
+
+// #261: a setup step that fails because of the machine or the network is reported as an infrastructure failure with its cause,
+// so it is not read as a failure of the code under test.
+describe('Infrastructure failures of the test setup', () => {
+  const result = overrides => ({ ok: false, code: 1, signal: null, timedOut: false, error: null, stderr: '', durationMs: 10, ...overrides });
+  it('when a setup command runs out of its time limit then the failure says infrastructure and the time it ran, not null', () => {
+    assert.equal(infrastructureFailure('fixture copy', result({ code: null, signal: 'SIGKILL', timedOut: true, durationMs: 120004 })).message,
+      '[infrastructure] fixture copy: timed out after 120004ms');
+  });
+  it('when a setup command fails with output then the failure says infrastructure and keeps the output', () => {
+    assert.equal(infrastructureFailure('docker pull node', result({ stderr: 'TLS handshake timeout\n' })).message, '[infrastructure] docker pull node: TLS handshake timeout');
+  });
+  it('when a setup command fails without output then the failure names its exit', () => {
+    assert.equal(infrastructureFailure('fixture copy', result({ code: 2 })).message, '[infrastructure] fixture copy: exit 2');
+    assert.equal(infrastructureFailure('fixture copy', result({ code: null, error: 'spawn cp ENOENT' })).message, '[infrastructure] fixture copy: spawn cp ENOENT');
+  });
+});
+
+describe('Docker base images prepared before the tests that build on them', () => {
+  const docker = outcomes => {
+    const calls = [];
+    return { calls, run: async (command, args) => { calls.push(args.join(' ')); const next = outcomes[args[0]]; return { ok: false, code: 1, stderr: '', ...(typeof next === 'function' ? next() : next) }; } };
+  };
+  it('when the image is already local then nothing is pulled', async () => {
+    const fake = docker({ info: { ok: true }, image: { ok: true } });
+    await prepareImage('node:22', { run: fake.run, waitMs: 0 });
+    assert.deepEqual(fake.calls, ['info', 'image inspect node:22']);
+  });
+  it('when a pull fails and a later attempt succeeds then the image is ready', async () => {
+    let pulls = 0;
+    const fake = docker({ info: { ok: true }, image: { ok: false }, pull: () => (++pulls < 3 ? { stderr: 'connection reset by peer' } : { ok: true }) });
+    await prepareImage('node:22', { run: fake.run, waitMs: 0 });
+    assert.equal(fake.calls.filter(c => c === 'pull node:22').length, 3);
+  });
+  it('when every pull fails then it stops as an infrastructure failure with the last cause', async () => {
+    const fake = docker({ info: { ok: true }, image: { ok: false }, pull: { stderr: 'TLS handshake timeout' } });
+    await assert.rejects(prepareImage('node:22', { run: fake.run, waitMs: 0 }), { message: '[infrastructure] docker pull node:22: TLS handshake timeout' });
+    assert.equal(fake.calls.filter(c => c === 'pull node:22').length, 3);
+  });
+  it('when there is no Docker daemon then nothing is pulled and the tests decide what that means', async () => {
+    const fake = docker({ info: { ok: false } });
+    await prepareImage('node:22', { run: fake.run, waitMs: 0 });
+    assert.deepEqual(fake.calls, ['info']);
   });
 });
