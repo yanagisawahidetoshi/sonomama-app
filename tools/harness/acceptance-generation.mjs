@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { acceptancePath, generatedVerifierId } from './acceptance-registry.mjs';
 export { generatedVerifierId };
-import { acceptanceDirectory, inspectGeneratedAcceptance } from './acceptance-quality.mjs';
+import { acceptanceDirectory, credentialNameRule, inspectGeneratedAcceptance } from './acceptance-quality.mjs';
 import { hasSecret } from './evidence-protection.mjs';
 import { fenced, sections } from './sbi-issue.mjs';
 import { specDigest } from './spec-approval.mjs';
@@ -43,6 +43,7 @@ function prompt(spec, feedback = []) {
     '受け入れ要件:', ...spec.acceptanceCriteria.map(a => `- ${a.id}: ${a.description}`),
     'Gherkin:', spec.gherkin,
     '規則: 全てのACと全てのScenarioを、実在するexampleに対応させる。各exampleはThenの期待結果をexpectで確かめる。skip・pending・focus・定数どうしのexpect・検証対象（Policy・Controller等）のstubは使わない。',
+    credentialNameRule,
     '仕様が曖昧で判定できない場合は、files と mapping を空にし、escalation に理由を書く。',
     // A regeneration after detection (G) failed: the approved spec stays the source of truth; the reasons only say what was not proven.
     ...(feedback.length ? ['前回生成したテストは検出（G）を満たしませんでした。上の承認済み仕様を正本として、テストを作り直してください。assertionの削除・期待値の緩和・skip・固定値化はしない。', ...feedback.map(f => `- ${f}`)] : []),
