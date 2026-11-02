@@ -2,7 +2,7 @@
 // A mapping only counts when the example it names exists, really runs and checks an expected result. These are heuristics: the final
 // judgement of a generated test stays with the PR Review, and the detection of a controlled violation is a separate, executed check.
 export const acceptanceDirectory = sbiIssue => `apps/api/spec/acceptance/sbi_${sbiIssue}/`;
-// The secret scan reads `token = <anything>` as a credential by the name alone, so a generated answer with such a variable stops the run.
+// The secret scan takes an assignment to a variable named like a credential for a credential by the name alone, which stops the run.
 export const credentialNameRule = '規則: ローカル変数・ブロック引数の名前に token / secret / password / credential / authorization / api_key / access_key を使わない（例: token → segment）。秘密値の検出は名前だけで秘密値とみなし、runが止まる。';
 // The description is a Ruby string literal; a backslash escapes the quote that would otherwise end it.
 const exampleStart = /^(\s*)(it|specify|example|scenario|xit|xspecify|xexample|fit|fspecify|fexample)\s*\(?\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')(.*?)\s+do\s*(\|[^|]*\|)?\s*$/;
