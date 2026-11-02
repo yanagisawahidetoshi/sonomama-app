@@ -655,6 +655,11 @@ describe('CI workflow setup', () => {
       const step = job.steps.find(s => s.run === 'pnpm harness:test');
       assert.equal(step.env.HARNESS_TEST_SHARD, `\${{ matrix.shard }}/${shards.length}`);
     });
+    // #268: the runner concurrency is the CI's own decision, so a change of the local default does not silently change CI.
+    it('when a shard runs then its test file concurrency is set by the workflow, not inherited from the local default', () => {
+      const step = job.steps.find(s => s.run === 'pnpm harness:test');
+      assert.match(String(step.env.HARNESS_TEST_CONCURRENCY), /^[1-9]\d*$/);
+    });
     it('when harness:test runs with a shard then node runs only that shard of the full file list, and without one it runs everything', async () => {
       const script = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).scripts['harness:test'];
       assert.match(script, /^node --test \$\{HARNESS_TEST_SHARD:\+--test-shard=\$HARNESS_TEST_SHARD\} /);
