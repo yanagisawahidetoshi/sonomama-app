@@ -660,6 +660,13 @@ describe('CI workflow setup', () => {
       assert.match(script, /^node --test \$\{HARNESS_TEST_SHARD:\+--test-shard=\$HARNESS_TEST_SHARD\} /);
       for (const glob of ['tools/harness/*.test.mjs', 'tools/harness/agents/*.test.mjs', '.harness/verification/*.test.mjs', '.harness/verification/lib/*.test.mjs']) assert.ok(script.includes(glob), glob);
     });
+    // #268: node defaults to one test file per core but one, and each file makes fixtures, Git worktrees and runs; a single
+    // harness:test overloaded a 12 core machine. The default is a measured safe value that does not grow with the core count.
+    it('when harness:test runs then the test file concurrency is explicit, at most 4 by default and overridable', async () => {
+      const script = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).scripts['harness:test'];
+      const [, value] = script.match(/ --test-concurrency=\$\{HARNESS_TEST_CONCURRENCY:-(\d+)\} /) ?? [];
+      assert.ok(Number(value) >= 1 && Number(value) <= 4, script);
+    });
   });
 
   // The self-repair demo was the longest job of a pull request run: every real application verifier ran a second time inside its run

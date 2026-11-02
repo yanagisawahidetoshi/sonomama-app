@@ -1,5 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fixture } from './test-fixture.mjs';
@@ -30,4 +32,21 @@ describe('Test fixture repository', () => {
     assert.equal((await git(b, ['status', '--porcelain', '--untracked-files=all'])).stdout, '');
     assert.equal((await git(a, ['rev-parse', '--git-dir'])).stdout.trim(), '.git');
   })));
+  // #268: a killed test process never reaches its finally; the next test process removes what the killed one left behind.
+  it('when a test process is killed while its fixture is open then the next test process removes that fixture', async () => {
+    const module = JSON.stringify(new URL('./test-fixture.mjs', import.meta.url).href);
+    const node = script => spawn(process.execPath, ['--input-type=module', '-e', `import { fixture } from ${module};${script}`], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const exit = child => new Promise(resolve => child.once('exit', resolve));
+    const killed = node('await fixture(async root => { console.log(root); await new Promise(() => {}); });');
+    const root = await new Promise((resolve, reject) => {
+      killed.stdout.once('data', chunk => resolve(chunk.toString().trim()));
+      killed.once('exit', code => reject(new Error(`fixture process exited early: ${code}`)));
+    });
+    assert.equal(existsSync(join(root, '.git')), true);
+    killed.kill('SIGKILL');
+    await exit(killed);
+    assert.equal(existsSync(root), true);
+    assert.equal(await exit(node('await fixture(async () => {});')), 0);
+    assert.equal(existsSync(root), false);
+  });
 });
