@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -198,7 +198,10 @@ describe('API contract verifier', () => {
     const repositoryContract = new URL('../../packages/api-schema/openapi.yaml', import.meta.url);
     const prepare = async root => {
       // The run workspace lies inside the repository and resolves the Harness dependencies (yaml) from its node_modules, as a checkout does.
+      // The link is a file to Git, which .gitignore's node_modules/ does not match; it stays untracked so the run accepts the workspace.
       await symlink(fileURLToPath(new URL('../../node_modules', import.meta.url)), join(root, 'node_modules')).catch(error => { if (error.code !== 'EEXIST') throw error; });
+      await mkdir(join(root, '.git/info'), { recursive: true });
+      await appendFile(join(root, '.git/info/exclude'), '/node_modules\n');
       await writeFile(join(root, 'packages/api-schema/openapi.yaml'), await readFile(repositoryContract, 'utf8'));
       await update(root, '.harness/state/sample-sbi.json', s => { s.requiredVerifiers = ['api-contract']; });
       // The Prism Mock check is covered by its own tests; only the contract comparison is under test here.
