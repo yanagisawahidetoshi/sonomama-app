@@ -11,7 +11,7 @@ import { startApiDocs } from './api-docs.mjs';
 import { relativePath } from './schemas.mjs';
 import { describeImpact, describeJudge, loadImpact, runCompletionJudge, runVerifier } from './impact.mjs';
 import { checkConclusion, runTrustedJudge } from './trusted-judge.mjs';
-import { runPushGate } from './push-gate.mjs';
+import { fullGateEnv, runPushGate } from './push-gate.mjs';
 import { providerAiReviewer } from './agents/ai-review-adapter.mjs';
 import { describeSbiSource } from './sbi-source.mjs';
 import { collectPbiStatus, renderPbiStatus, acceptPbi } from './pbi-status.mjs';
@@ -201,11 +201,11 @@ try {
     // git hands the pushed refs to .githooks/pre-push on stdin; the hook passes them through HARNESS_PUSH_REFS.
     // The refs describe this push only; hook tests inside harness:test must not inherit them.
     const { HARNESS_PUSH_REFS: refs = '', ...env } = process.env;
-    const pnpm = (args, cwd) => spawnSync('pnpm', args, { cwd, stdio: 'inherit', env }).status === 0;
+    const pnpm = (args, cwd, scope = env) => spawnSync('pnpm', args, { cwd, stdio: 'inherit', env: scope }).status === 0;
     // Each check runs in the detached worktree of the pushed commit, which starts without node_modules.
     const result = await runPushGate({ root, refs, log: line => console.log(redactText(line)),
       install: workspace => pnpm(['install', '--frozen-lockfile', '--prefer-offline'], workspace),
-      runFull: workspace => pnpm(['harness:test'], workspace),
+      runFull: workspace => pnpm(['harness:test'], workspace, fullGateEnv(env)),
       verifyOne: async (id, base, workspace) => { process.env.HARNESS_BASE_REF = base; return printVerifier({ root: workspace, base, all: false, id }); } });
     process.exitCode = result.passed ? 0 : 1;
   } else if (command === 'pr') {

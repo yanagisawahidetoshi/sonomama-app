@@ -7,6 +7,8 @@ import { configSchema } from './schemas.mjs';
 import { git } from './workspace.mjs';
 // pre-push scope. Impact Analysis decides the verifiers; whatever the gate cannot scope safely runs the Full Gate (harness:test).
 const zero = /^0{40}$/;
+// #261: at the node default (one file per core but one) the Full Gate starved its own processes; 3 at once took no longer.
+export const fullGateEnv = env => ({ ...env, HARNESS_TEST_CONCURRENCY: '3' });
 
 export function planPushGate({ refs, head, fallbackBase }) {
   const lines = refs.split('\n').filter(Boolean).map(line => line.split(' '));
