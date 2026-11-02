@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { inspectViolation, judgeViolation, violationLimits, violationResponseSchema } from './acceptance-violation.mjs';
+import { inspectViolation, judgeViolation, violationLimits, violationPrompt, violationResponseSchema } from './acceptance-violation.mjs';
 
 // #147: controlled violation. For a Scenario that already passes before the implementation, the generation agent proposes a minimal change
 // to the application that must make that Scenario's expected outcome fail. The Harness accepts or rejects the proposal mechanically.
@@ -132,5 +132,13 @@ describe('Response schema of the violation proposal', () => {
       assert.equal(violationResponseSchema.type, 'object');
       assert.deepEqual(Object.keys(violationResponseSchema.properties), ['violations', 'escalation']);
     });
+  });
+});
+
+describe('The prompt handed to the violation agent', () => {
+  it('given scenarios to break when the prompt is built then it tells the agent not to name a local variable or block parameter after a credential, which the secret scan would stop', () => {
+    const prompt = violationPrompt({ sbiIssue: 7, scenarios: [{ scenario: '担当講師が閲覧する', acceptanceIds: ['AC-1'], examples: ['200を返す'] }] });
+    const rule = prompt.split('\n').find(line => line.includes('ローカル変数'));
+    for (const name of ['token', 'secret', 'password', 'credential', 'authorization', 'api_key', 'access_key']) assert.match(rule ?? '', new RegExp(name));
   });
 });

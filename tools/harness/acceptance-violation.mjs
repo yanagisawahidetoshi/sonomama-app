@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { z } from 'zod';
 import { isGeneratedAcceptanceInput } from './acceptance-generation.mjs';
+import { credentialNameRule } from './acceptance-quality.mjs';
 import { expectationNotMet } from './acceptance-run.mjs';
 import { hasSecret } from './evidence-protection.mjs';
 import { execute } from './io.mjs';
@@ -32,6 +33,7 @@ export function violationPrompt({ sbiIssue, scenarios }) {
     `対象: SBI Issue #${sbiIssue}。次のScenarioは実装前からPASSしています。Scenarioごとに、そのScenarioの期待結果（Then）だけが外れるようになる最小の変更を1つ提案してください。`,
     ...scenarios.map(s => `- ${s.scenario}（${s.acceptanceIds.join(', ')}）: ${s.examples.join(' / ')}`),
     `規則: 変更できるのは既存の apps/api/app/** のファイルだけ（新規作成・削除は不可）。spec・fixture・config・migration・DB schemaは変更しない。1つのScenarioにつき${violationLimits.files}ファイル・${violationLimits.changedLines}行まで。構文エラーや読み込みエラーで落とすのではなく、期待結果そのものが外れる変更にする。`,
+    credentialNameRule,
     '各ファイルは変更後の内容全体を content に入れる。安全に作れない場合は violations を空にし、escalation に理由を書く。',
   ].join('\n');
 }
