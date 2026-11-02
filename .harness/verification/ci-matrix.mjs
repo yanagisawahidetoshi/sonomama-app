@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 // Trusted acceptance for SBI-CI-MATRIX (#34). Reads the worktree and evaluates the pure Impact Analysis; it runs no verifier command.
@@ -58,7 +58,10 @@ try {
       assert.match(job('harness'), /harness:judge/);
     }],
     ['CI-AC-14', 'Given a required verifier, When its app is missing or unconfigured, Then the result is not PASS', async () => {
-      const result = await verify({ root, workspace: root, config: config(), sbi: sbi([]), files: files(paths.api), only: new Set(['api-contract']), selected: new Map([['api-contract', true]]) });
+      // The repository carries an API contract (#251), so the missing app is a workspace without one, not the repository itself.
+      const workspace = join(root, '.harness/verification/fixtures/no-api-contract');
+      for (const name of ['openapi.yaml', 'openapi.yml', 'openapi.json']) assert.equal(existsSync(join(workspace, 'packages/api-schema', name)), false, `the fixture has no ${name}`);
+      const result = await verify({ root, workspace, config: config(), sbi: sbi([]), files: files(paths.api), only: new Set(['api-contract']), selected: new Map([['api-contract', true]]) });
       assert.notEqual(result.status, 'PASS');
     }],
     ['CI-AC-15', 'Given a Harness change, When analysing, Then the Full Gate runs harness:test and the self-repair demo', () => {
