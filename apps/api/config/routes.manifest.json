@@ -1,6 +1,12 @@
 [
   {
     "verb": "GET",
+    "path": "/api/v1/health(.:format)",
+    "controller": "api/v1/health",
+    "action": "show"
+  },
+  {
+    "verb": "GET",
     "path": "/up(.:format)",
     "controller": "rails/health",
     "action": "show"
