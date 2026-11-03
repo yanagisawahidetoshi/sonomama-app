@@ -409,6 +409,7 @@ Reviewer名・prompt・agent応答・秘密値もMetricsに含めず、他のEvi
 
 SPEC_AMBIGUOUS・DESIGN_DECISION_REQUIRED・AGENT_ESCALATION・NEW_SECURITY_SCOPE・NEW_HIGH_RISK・SCOPE_VIOLATION・LANE_ESCALATIONは、承認済みSBIで決められない判断として`decision: NEEDS_HUMAN_DECISION`を持つ。
 | SOURCE_CHANGED / WORKSPACE_CHANGED | 元リポジトリ・入力・worktreeの変化 |
+| PROVIDER_TIMEOUT | provider（Claude / Codex）の呼び出しが`providerTimeoutMs`を超えた。子孫プロセスまで止め、数秒以内にrunを止める |
 | UNKNOWN | 上記に分類できない実行時エラー |
 
 ## provider切り替え

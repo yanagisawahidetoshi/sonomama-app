@@ -369,6 +369,8 @@ async function prepareGeneratedAcceptance({ root, summary, inputs, source, quiet
   // scenarios repeats the last attempt, the one the registration (or the escalation) is based on.
   const record = status => json(join(directory, 'acceptance-detection.json'), redact({ status, scenarios: attempts.at(-1)?.scenarios ?? [], attempts }));
   let feedback = [], registration = null;
+  // #277: a provider that fails or runs out of time stops the run with its reason; the run is never left PENDING.
+  try {
   for (let attempt = 1; attempt <= inputs.config.maxConsecutiveFailures && !registration; attempt += 1) {
     const generation = await generateAcceptance({ workspace, issue: source.issue, provider: summary.provider, runId: summary.id, agent, feedback });
     await json(join(directory, 'acceptance-generation.json'), redact(generation));
@@ -381,6 +383,9 @@ async function prepareGeneratedAcceptance({ root, summary, inputs, source, quiet
     if (detected.scenarios.every(s => s.outcome === 'detected')) registration = generation.registration;
     // The next attempt is told which Scenario was not proven and why, not the violation it was checked with.
     else feedback = detected.scenarios.filter(s => s.outcome !== 'detected').map(s => `${s.scenario}: ${s.outcome === 'missed' ? '違反を入れてもPASSしました' : '判定できませんでした'}（${s.reason}）`);
+  }
+  } catch (error) {
+    return escalate(`Agent/runtime error: ${redactText(error.message)}`, classifyEscalation(error.message));
   }
   if (!registration) {
     await record('FAIL');
