@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { check } from './check.mjs';
 import { json, readJson, exists, evidenceText } from './io.mjs';
-import { responseSchema, runIdSchema } from './schemas.mjs';
+import { providerTimeoutMs, responseSchema, runIdSchema } from './schemas.mjs';
 import { runAgent, makePrompt, providerCommand } from './agents/index.mjs';
 import { verify, checksPassed } from './verifier.mjs';
 import { review } from './reviewer.mjs';
@@ -186,7 +186,7 @@ async function verifyHead({ root, summary, inputs, result, iterDir, iteration, r
     result.review = redact(await reviewer({ root, workspace, sbi, rules, verification: result.verification, files }));
     await json(join(iterDir, 'review.json'), result.review);
     result.semanticReview = redact(await runAiReview({ provider: summary.provider, semanticReviewer, input: { root, workspace, sbi, verification: result.verification, provider: summary.provider,
-      headSha: summary.headSha, baselineSha: summary.baselineSha, files, timeoutMs: config.timeoutMs } }));
+      headSha: summary.headSha, baselineSha: summary.baselineSha, files, timeoutMs: providerTimeoutMs(config) } }));
     await json(join(iterDir, 'semantic-review.json'), result.semanticReview);
     await transition('JUDGING', `iteration ${iteration}`);
     result.completion = judge(result, sbi);
@@ -216,7 +216,7 @@ async function executeLoop({ root, summary, inputs, quiet, agent = runAgent, rev
       await transition('IMPLEMENTING', `iteration ${iteration}`);
       const prompt = await makePrompt({ root, sbi, workspace, feedback, rules });
       await evidenceText(join(iterDir, 'prompt.txt'), prompt);
-      const response = responseSchema.parse(await agent({ provider: summary.provider, iteration, prompt, directory: iterDir, workspace, timeoutMs: config.timeoutMs }));
+      const response = responseSchema.parse(await agent({ provider: summary.provider, iteration, prompt, directory: iterDir, workspace, timeoutMs: providerTimeoutMs(config) }));
       await workspaceIntegrity(workspace, summary.headSha); // Reject a CLI that edited files directly.
       await evidenceText(join(iterDir, 'agent.log'), JSON.stringify(redact(response), null, 2) + '\n');
       if (response.escalation) { result.agent = { status: 'ESCALATED', reason: response.escalation }; await record(); return escalate(response.escalation, 'AGENT_ESCALATION'); }
@@ -362,7 +362,7 @@ async function detectScenarios({ workspace, directory, registration, sbiIssue, c
 async function prepareGeneratedAcceptance({ root, summary, inputs, source, quiet, acceptanceAgent, violationAgent, acceptanceRunner = runGeneratedAcceptance }) {
   const { directory, workspace } = runPaths(root, summary.id);
   const { escalate } = controller(root, summary, quiet);
-  const ask = request => runAgent({ provider: summary.provider, iteration: 0, prompt: request.prompt, schema: request.schema, directory, workspace, timeoutMs: inputs.config.timeoutMs });
+  const ask = request => runAgent({ provider: summary.provider, iteration: 0, prompt: request.prompt, schema: request.schema, directory, workspace, timeoutMs: providerTimeoutMs(inputs.config) });
   const agent = acceptanceAgent ?? ask, violator = violationAgent ?? ask;
   // Evidence keeps digests and results only; the violation patches themselves are never written anywhere.
   const attempts = [];

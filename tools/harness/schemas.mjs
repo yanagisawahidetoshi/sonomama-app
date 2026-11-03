@@ -73,10 +73,14 @@ export const acceptanceResultSchema = z.strictObject({
     errorsOutsideOfExamples: z.number().int().min(0), error: z.string().optional(),
   }),
 });
+export const providerTimeoutMs = config => config.providerTimeoutMs ?? config.timeoutMs;
 export const configSchema = z.strictObject({
   version: z.literal(1), provider: z.enum(['fake', 'codex', 'claude']), sbi: relativePath,
   maxConsecutiveFailures: z.number().int().min(1).max(3), maxIterations: z.number().int().min(1).max(20),
   timeoutMs: z.number().int().min(100).max(600000),
+  // A provider call (implementation, Acceptance generation, controlled violation, AI Review, Planner) reads files, decides and writes several of
+  // them, so it gets its own limit; verifiers and Trusted Acceptance scripts keep timeoutMs. Without it, providers fall back to timeoutMs.
+  providerTimeoutMs: z.number().int().min(100).max(1800000).optional(),
   // #246: the limit of each setup command (dependency install); a verifier may set its own setupTimeoutMs and timeoutMs.
   setupTimeoutMs: z.number().int().min(100).max(1800000).optional(),
   securityVerifiers: z.array(z.strictObject({ id: text, directory: z.union([z.literal('.'), relativePath]), commands: z.array(z.array(text).min(1)), ...phaseSettings,
