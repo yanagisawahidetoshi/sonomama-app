@@ -90,8 +90,8 @@ describe('Push gate planning',()=>{
       ['a new branch has no default branch to compare with',`refs/heads/x ${head} refs/heads/x ${zero}\n`,null,[head],'no base for a new branch'],
       ['a line is malformed','refs/heads/x\n','origin/main',[head],'push refs unknown'],
     ]) {
-      it(`when ${name} then runs the Full Gate on the commits that are pushed, or on HEAD when they are unknown`,()=>{
-        assert.deepEqual(planPushGate({refs,head,fallbackBase}),{mode:'full',shas,reasons:[reason]});
+      it(`when ${name} then leaves the Harness tests to CI`,()=>{
+        assert.deepEqual(planPushGate({refs,head,fallbackBase}),{mode:'unscoped',shas,reasons:[reason]});
       });
     }
   });
@@ -102,99 +102,91 @@ describe('Push gate planning',()=>{
   });
 });
 
+// #288: pre-push gives fast feedback. It runs only the Harness tests that name a changed module; the verifiers, the Full Gate and
+// whatever it cannot narrow run in CI, and the push to main runs everything.
 describe('Push gate execution',()=>{
   const branch=async (root,paths)=>{
     const base=(await git(root,['rev-parse','HEAD'])).stdout.trim();
     await git(root,['switch','-c','feature']);
-    for (const path of paths) { await mkdir(join(root,path,'..'),{recursive:true}); await writeFile(join(root,path),'export const changed = true;\n'); }
+    for (const [path,text] of Object.entries(Array.isArray(paths)?Object.fromEntries(paths.map(p=>[p,'export const changed = true;\n'])):paths)) {
+      await mkdir(join(root,path,'..'),{recursive:true}); await writeFile(join(root,path),text);
+    }
     await commitFixture(root);
     const head=(await git(root,['rev-parse','HEAD'])).stdout.trim();
     return `refs/heads/feature ${head} refs/heads/feature ${base}\n`;
   };
-  const gate=async (root,refs,results={})=>{
-    const verified=[]; let full=0;
-    const result=await runPushGate({root,refs,install:async()=>true,runFull:async()=>{ full++; return true; },verifyOne:async id=>{ verified.push(id); return results[id] ?? true; }});
-    return {...result,verified,full};
+  // The module is named through a variable: a literal path in this file would make this test select itself.
+  const light='light', module={[`tools/harness/${light}.mjs`]:'export const light = true;\n',[`tools/harness/${light}.test.mjs`]:`import { light } from './${light}.mjs';\n`};
+  const gate=async (root,refs,{passes=true}={})=>{
+    const ran=[]; let installed=0;
+    const result=await runPushGate({root,refs,install:async()=>{ installed++; return true; },runTests:async (workspace,tests)=>{ ran.push(...tests); return passes; }});
+    return {...result,ran,installed};
   };
   describe('given a change in one application area',()=>{
-    for (const [area,path,expected] of [['Admin','apps/admin/src/main.ts',['admin']],['Mobile','apps/mobile/src/app/index.tsx',['expo']],['Rails','apps/api/app/models/lesson.rb',['rails']]]) {
-      it(`when only ${area} changes then runs only the verifiers Impact Analysis selects, not the full Harness test`,()=>fixture(async root=>{
+    for (const [area,path] of [['Admin','apps/admin/src/main.ts'],['Mobile','apps/mobile/src/app/index.tsx'],['Rails','apps/api/app/models/lesson.rb']]) {
+      it(`when only ${area} changes then runs no verifier and no Harness test and installs nothing, leaving the verifiers to CI`,()=>fixture(async root=>{
         const result=await gate(root,await branch(root,[path]));
-        assert.equal(result.mode,'impact');
-        assert.deepEqual(result.verified,expected);
-        assert.equal(result.full,0);
+        assert.deepEqual(result.ran,[]);
+        assert.equal(result.installed,0);
         assert.equal(result.passed,true);
       }));
     }
-    it('when a required verifier fails then stops the push',()=>fixture(async root=>{
-      const result=await gate(root,await branch(root,['apps/admin/src/main.ts']),{admin:false});
+  });
+  describe('given a change of a Harness module',()=>{
+    it('when tests import the module then runs only those tests on the pushed commit',()=>fixture(async root=>{
+      const result=await gate(root,await branch(root,module));
+      assert.equal(result.mode,'impact');
+      assert.deepEqual(result.ran,[`tools/harness/${light}.test.mjs`]);
+      assert.equal(result.installed,1);
+      assert.equal(result.passed,true);
+    }));
+    it('when a selected test fails then stops the push',()=>fixture(async root=>{
+      const result=await gate(root,await branch(root,module),{passes:false});
       assert.equal(result.passed,false);
     }));
   });
-  describe('given a change that Impact Analysis sends to the Full Gate',()=>{
-    for (const path of ['tools/harness/verifier.mjs','.harness/config/lanes.json','.github/workflows/harness.yml','.githooks/pre-push']) {
-      it(`when ${path} changes then runs the full Harness test`,()=>fixture(async root=>{
-        const result=await gate(root,await branch(root,[path]));
-        assert.equal(result.mode,'full');
-        assert.deepEqual(result.reasons,[`diff:${path}`]);
-        assert.equal(result.full,1);
+  describe('given a change that only CI can narrow',()=>{
+    for (const path of ['.harness/config/lanes.json','.github/workflows/harness.yml','.githooks/pre-push','.node-version']) {
+      it(`when ${path} changes then runs no Harness test locally and says CI runs them`,()=>fixture(async root=>{
+        const lines=[];
+        const result=await runPushGate({root,refs:await branch(root,[path]),log:line=>lines.push(line),install:async()=>true,runTests:async()=>assert.fail('no local test')});
+        assert.equal(result.passed,true);
+        assert.ok(lines.some(l=>l.includes('CI')&&l.includes(path)),lines.join('\n'));
       }));
     }
-    it('when only .node-version changes then runs the full Harness test for the toolchain',()=>fixture(async root=>{
-      const result=await gate(root,await branch(root,['.node-version']));
-      assert.equal(result.mode,'full');
-      assert.deepEqual(result.reasons,['toolchain:.node-version']);
-      assert.equal(result.full,1);
-    }));
-    it('when the full Harness test fails then stops the push',()=>fixture(async root=>{
-      const refs=await branch(root,['tools/harness/verifier.mjs']);
-      const result=await runPushGate({root,refs,install:async()=>true,runFull:async()=>false,verifyOne:async()=>true});
-      assert.equal(result.passed,false);
-    }));
-  });
-  describe('given a remote commit this clone does not have',()=>{
-    it('when the impact cannot be computed then runs the Full Gate',()=>fixture(async root=>{
+    it('when the push cannot be scoped then runs no Harness test locally',()=>fixture(async root=>{
       await branch(root,['apps/admin/src/main.ts']);
       const head=(await git(root,['rev-parse','HEAD'])).stdout.trim();
       const result=await gate(root,`refs/heads/feature ${head} refs/heads/feature ${sha('e')}\n`);
-      assert.equal(result.mode,'full');
+      assert.equal(result.mode,'unscoped');
       assert.deepEqual(result.reasons,['remote commit unknown locally']);
-      assert.equal(result.full,1);
+      assert.deepEqual(result.ran,[]);
+      assert.equal(result.passed,true);
     }));
   });
   describe('given only documentation changes',()=>{
-    it('when no verifier is required then passes after harness:check alone',()=>fixture(async root=>{
+    it('when no Harness test is selected then passes after harness:check alone',()=>fixture(async root=>{
       const result=await gate(root,await branch(root,['docs/architecture/notes.md']));
-      assert.equal(result.mode,'impact');
-      assert.deepEqual(result.verified,[]);
-      assert.equal(result.full,0);
+      assert.deepEqual(result.ran,[]);
+      assert.equal(result.installed,0);
       assert.equal(result.passed,true);
     }));
   });
   describe('given a working tree that differs from the pushed commit',()=>{
     const worktrees=async root=>(await git(root,['worktree','list','--porcelain'])).stdout.split('\n').filter(l=>l.startsWith('worktree '));
     const gone=async path=>access(path).then(()=>false,()=>true);
-    it('when HEAD is broken and only an uncommitted fix passes then verifies the pushed commit and stops the push',()=>fixture(async root=>{
-      const refs=await branch(root,['apps/admin/src/main.ts']);
-      await writeFile(join(root,'apps/admin/src/main.ts'),'export const fixed = true;\n');
-      const result=await runPushGate({root,refs,install:async()=>true,runFull:async()=>true,
-        verifyOne:async (id,base,workspace)=>(await readFile(join(workspace,'apps/admin/src/main.ts'),'utf8')).includes('fixed')});
+    it('when HEAD is broken and only an uncommitted fix passes then tests the pushed commit and stops the push',()=>fixture(async root=>{
+      const refs=await branch(root,module);
+      await writeFile(join(root,`tools/harness/${light}.mjs`),'export const light = "fixed";\n');
+      const result=await runPushGate({root,refs,install:async()=>true,
+        runTests:async workspace=>(await readFile(join(workspace,`tools/harness/${light}.mjs`),'utf8')).includes('fixed')});
       assert.equal(result.passed,false);
     }));
-    it('when the Full Gate runs then runs it on the pushed commit, not on the uncommitted working tree',()=>fixture(async root=>{
-      const refs=await branch(root,['tools/harness/verifier.mjs']);
-      await writeFile(join(root,'tools/harness/verifier.mjs'),'export const fixed = true;\n');
-      const seen=[];
-      const result=await runPushGate({root,refs,install:async()=>true,verifyOne:async()=>true,
-        runFull:async workspace=>{ seen.push(await readFile(join(workspace,'tools/harness/verifier.mjs'),'utf8')); return true; }});
-      assert.equal(result.mode,'full');
-      assert.deepEqual(seen,['export const changed = true;\n']);
-    }));
-    it('when the gate verifies then hands over a detached worktree at the pushed commit outside the checkout and removes it afterwards',()=>fixture(async root=>{
-      const refs=await branch(root,['apps/admin/src/main.ts']);
+    it('when the gate tests then hands over a detached worktree at the pushed commit outside the checkout and removes it afterwards',()=>fixture(async root=>{
+      const refs=await branch(root,module);
       const pushed=refs.split(' ')[1];
       const seen=[];
-      await runPushGate({root,refs,install:async()=>true,runFull:async()=>true,verifyOne:async (id,base,workspace)=>{
+      await runPushGate({root,refs,install:async()=>true,runTests:async workspace=>{
         seen.push({workspace,head:(await git(workspace,['rev-parse','HEAD'])).stdout.trim(),branch:(await git(workspace,['rev-parse','--abbrev-ref','HEAD'])).stdout.trim()});
         return true;
       }});
@@ -207,23 +199,23 @@ describe('Push gate execution',()=>{
       assert.deepEqual(await worktrees(root),[`worktree ${root}`]);
     }));
     it('when the dependencies cannot be installed in the worktree then stops the push and removes the worktree',()=>fixture(async root=>{
-      const refs=await branch(root,['apps/admin/src/main.ts']);
-      let verified=0;
-      const result=await runPushGate({root,refs,install:async()=>false,runFull:async()=>true,verifyOne:async()=>{ verified++; return true; }});
+      const refs=await branch(root,module);
+      let tested=0;
+      const result=await runPushGate({root,refs,install:async()=>false,runTests:async()=>{ tested++; return true; }});
       assert.equal(result.passed,false);
-      assert.equal(verified,0);
+      assert.equal(tested,0);
       assert.deepEqual(await worktrees(root),[`worktree ${root}`]);
     }));
-    it('when a verifier throws then still removes the worktree',()=>fixture(async root=>{
-      const refs=await branch(root,['apps/admin/src/main.ts']);
-      await assert.rejects(runPushGate({root,refs,install:async()=>true,runFull:async()=>true,verifyOne:async()=>{ throw new Error('boom'); }}),/boom/);
+    it('when a test run throws then still removes the worktree',()=>fixture(async root=>{
+      const refs=await branch(root,module);
+      await assert.rejects(runPushGate({root,refs,install:async()=>true,runTests:async()=>{ throw new Error('boom'); }}),/boom/);
       assert.deepEqual(await worktrees(root),[`worktree ${root}`]);
     }));
-    it('when verification leaves untracked files then keeps the worktree without force and reports its path',()=>fixture(async root=>{
-      const refs=await branch(root,['apps/admin/src/main.ts']);
+    it('when the tests leave untracked files then keeps the worktree without force and reports its path',()=>fixture(async root=>{
+      const refs=await branch(root,module);
       const lines=[]; let workspace;
-      const result=await runPushGate({root,refs,install:async()=>true,runFull:async()=>true,log:line=>lines.push(line),
-        verifyOne:async (id,base,w)=>{ workspace=w; await writeFile(join(w,'stray.txt'),'left behind\n'); return true; }});
+      const result=await runPushGate({root,refs,install:async()=>true,log:line=>lines.push(line),
+        runTests:async w=>{ workspace=w; await writeFile(join(w,'stray.txt'),'left behind\n'); return true; }});
       try {
         assert.equal(result.passed,true);
         assert.deepEqual(result.leftovers,[workspace]);
