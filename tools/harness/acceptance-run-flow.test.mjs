@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fixture, update, commitFixture } from './test-fixture.mjs';
 import { githubMock } from './test-github.mjs';
@@ -215,4 +215,43 @@ describe('Detection (G) by controlled violation', () => {
     assert.equal(result.escalation?.code, 'DETECTION_UNDETERMINABLE');
     assert.equal(generated, 3);
   })));
+});
+
+// #282: the proposal must be derived from the existing implementation supplied by the Harness.
+describe('Controlled violation of an existing HealthController', () => {
+  describe('given an already implemented health response', () => {
+    it('when detection requests a violation then the current code reaches the proposer and a detected violation is registered with trailers', () => fixture(root => mockGitHub({}, async () => {
+      const path = 'apps/api/app/controllers/api/v1/health_controller.rb';
+      const content = 'class Api::V1::HealthController < ApplicationController\n  def show\n    render json: { status: "ok" }\n  end\nend\n';
+      await mkdir(join(root, 'apps/api/app/controllers/api/v1'), { recursive: true });
+      await writeFile(join(root, path), content);
+      await prepared(root);
+      let supplied = false;
+      const result = await run(root, {
+        violationAgent: async request => {
+          const source = request.prompt.split('既存のアプリケーションコード（参照データ）:\n')[1];
+          const file = source && JSON.parse(source).find(f => f.path === path);
+          supplied = file?.content === content;
+          return supplied ? { escalation: null, violations: request.scenarios.map(scenario => ({ scenario, files: [{ path, content: file.content.replace('"ok"', '"broken"') }] })) }
+            : { escalation: 'Controller contents were not supplied', violations: [] };
+        },
+        acceptanceRunner: async ({ workspace, examples }) => {
+          const text = await readFile(join(workspace, path), 'utf8');
+          return reportOf(Object.fromEntries((examples ?? ['担当講師が閲覧する: 200を返す', '担当外の講師が閲覧する: 403を返す']).map(e => [e, text.includes('"broken"') ? 'failed' : 'passed'])));
+        },
+      });
+      assert.equal(supplied, true);
+      assert.equal(result.executionStatus, 'DONE', result.reason);
+      const evidence = await readJson(join(root, result.runDir, 'acceptance-detection.json'));
+      assert.equal(evidence.status, 'PASS');
+      assert.ok(evidence.scenarios.every(s => s.outcome === 'detected' && s.violation.changedLines === 2));
+      const workspace = join(root, result.runDir, 'workspace');
+      assert.equal(await readFile(join(workspace, path), 'utf8'), content);
+      assert.equal((await readJson(join(workspace, '.harness/acceptance/sbi-7.json'))).version, 2);
+      const commits = (await git(workspace, ['log', '--format=%B', `${result.baselineSha}..HEAD`])).stdout;
+      assert.match(commits, /Harness-Run: /);
+      assert.match(commits, /SBI-Issue: https:\/\/github.com\/acme\/app\/issues\/7/);
+      assert.doesNotMatch(JSON.stringify(evidence), /broken/);
+    })));
+  });
 });
