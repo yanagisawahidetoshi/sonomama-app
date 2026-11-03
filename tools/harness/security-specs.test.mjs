@@ -218,6 +218,7 @@ describe('Security spec verifiers in the CI verifier matrix', () => {
       const verifier = c.securityVerifiers.find(v => v.id === suite.id);
       verifier.commands = [verifier.commands[0]];
       delete verifier.setupCommands;
+      delete verifier.dependencyStore;
       if (verifier.isolation !== 'compose') verifier.isolation = 'harness';
     });
     await commitFixture(root);
