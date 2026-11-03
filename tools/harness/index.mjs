@@ -25,7 +25,7 @@ import { assertState } from './state-machine.mjs';
 import { loadSbiIssue, inScope } from './sbi-issue.mjs';
 import { generateAcceptance, isGeneratedAcceptanceInput, isGeneratedRegistrationPath } from './acceptance-generation.mjs';
 import { judgeDetection, runGeneratedAcceptance } from './acceptance-run.mjs';
-import { inspectViolation, judgeViolation, parseViolationAnswer, violationPrompt, violationResponseSchema, withViolationCopy } from './acceptance-violation.mjs';
+import { inspectViolation, judgeViolation, parseViolationAnswer, violationContext, violationPrompt, violationResponseSchema, withViolationCopy } from './acceptance-violation.mjs';
 import { snapshotFromIssue, snapshotPath, riskView, snapshotVerified, snapshotMismatch } from './sbi-source.mjs';
 import { verifyReverifyLink, committedSnapshot, parsePullUrl, reverifyTrailers, mergeTree, gitVersion } from './reverify.mjs';
 import { parseIssueUrl } from './planner.mjs';
@@ -337,7 +337,7 @@ async function detectScenarios({ workspace, directory, registration, sbiIssue, c
   const carried = [];
   for (const test of registration.tests) carried.push({ path: test.path, content: await readFile(join(workspace, test.path), 'utf8') });
   const examplesOf = name => registration.mapping.find(m => m.scenario === name).examples.map(e => e.description);
-  const request = { prompt: violationPrompt({ sbiIssue, scenarios: satisfied.map(s => ({ ...s, examples: examplesOf(s.scenario) })) }), schema: violationResponseSchema, scenarios: satisfied.map(s => s.scenario) };
+  const request = { prompt: violationPrompt({ sbiIssue, files: await violationContext(workspace), scenarios: satisfied.map(s => ({ ...s, examples: examplesOf(s.scenario) })) }), schema: violationResponseSchema, scenarios: satisfied.map(s => s.scenario) };
   const answer = parseViolationAnswer(await violator(request));
   for (const s of satisfied) {
     const undeterminable = reason => Object.assign(s, { outcome: 'undeterminable', reason });
