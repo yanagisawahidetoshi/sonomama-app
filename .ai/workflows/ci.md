@@ -158,13 +158,13 @@ pnpm harness:verify --verifier admin --base origin/main
 
 ## pre-pushとの分担
 
-`.githooks/pre-push`は`harness:check`と`harness:push-gate`を呼ぶだけで、Verifierの一覧を持たない。`harness:push-gate`がgitから渡されたpush先のcommitをbaseに`harness:impact`と同じ判定を行い、required verifierを順に実行する。新しいbranchは`origin/main`と比べる。
+pre-pushは速いフィードバックだけを返す（#288）。`.githooks/pre-push`は`harness:check`と`harness:push-gate`を呼ぶだけで、Verifierの一覧を持たない。`harness:push-gate`はgitから渡されたpush先のcommitとの差分から、変更したHarnessのモジュール（`tools/harness/**/*.mjs`、`.harness/verification/**/*.mjs`）をimportするか、パスとして名指しするテストだけを実行する。新しいbranchは`origin/main`と比べる。Verifier（Docker）、`harness:test`全件、`harness:demo`はpre-pushで実行せず、CIに任せる。
 
-検証はcheckoutのworking treeではなく、pushするcommitのdetached worktree（OSの一時ディレクトリ）で行う。未commitの修正でworking treeだけがPASSしても、壊れたcommitはpushできない。worktreeでは`pnpm install --frozen-lockfile --prefer-offline`を先に実行する。検証後は`git worktree remove`（forceなし）で消し、検証が未追跡ファイルを残して消せなかったときはパスをログに出して残す。
+テストはcheckoutのworking treeではなく、pushするcommitのdetached worktree（OSの一時ディレクトリ）で実行する。未commitの修正でworking treeだけがPASSしても、壊れたcommitはpushできない。worktreeでは`pnpm install --frozen-lockfile --prefer-offline`を先に実行する。実行後は`git worktree remove`（forceなし）で消し、テストが未追跡ファイルを残して消せなかったときはパスをログに出して残す。
 
-次の場合はFull Gateとして`harness:test`全件を実行する。
+次の場合はpre-pushでテストを選べないので、何も実行せずCIに任せる。
 
-- `impact.fullGate`か`impact.toolchain`のパスが変わった
-- 複数のrefを同時にpushした（pushするcommitごとに実行）、push先のcommitが手元に無い、比較するbaseが無い、refを読めない（HEADのcommitで実行）
+- `impact.fullGate`のうちモジュール以外のパス（config・rules・workflow・hook・`AGENTS.md`・fixture等）か、`impact.toolchain`のパスが変わった
+- 複数のrefを同時にpushした、push先のcommitが手元に無い、比較するbaseが無い、refを読めない
 
 hookはローカルの早期検出用で、回避できる。Production source・Trusted Acceptance・Security・`harness:demo`はCIのCompletion Judgeが最終判定する。

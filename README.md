@@ -558,11 +558,11 @@ cleanで所有関係を確認できたworktreeだけを削除する。証跡・r
 
 Nodeは`.node-version`、pnpmはpackage.jsonのpackageManagerに固定。`pnpm install --frozen-lockfile`後のprepareで
 version管理された`.githooks/pre-push`を設定する。必要なら`pnpm hooks:install`で再設定できる。
-push前にharness:checkを必ず実行し、続けて`harness:push-gate`が、push対象のSHAをdetached worktreeに取り出してImpact Analysisで選んだVerifierだけを実行する（working treeの未commit変更は検証対象にならない）。
-Harness本体などFull Gate対象の変更、toolchain（`.node-version`・root `package.json`等）の変更や、push先との差分を特定できない場合はharness:test全件を実行する。どれかが失敗するとpushを止める。
+push前にharness:checkを必ず実行し、続けて`harness:push-gate`が、push対象のSHAをdetached worktreeに取り出し、変更したHarnessのモジュールを名指しするテストだけを実行する（working treeの未commit変更は検証対象にならない）。失敗するとpushを止める。
+Verifier、harness:test全件、harness:demoはpre-pushで実行せず、CIに任せる（#288）。
 `--no-verify`は通常手順にしない。
 
 GitHub ActionsはSBIと差分から必要なVerifierを並列実行し、Full Gate対象ならharness:testとharness:demo --fullも実行する。
 最終の品質ゲートはCIの`harness`チェック（Completion Judge）。詳細は[.ai/workflows/ci.md](.ai/workflows/ci.md)。Actionsはcommit SHA固定、読取専用権限、checkout認証情報を保存しない。
-ローカルhookは回避できるので、mainのRulesetで`harness`の成功とPR経由を必須にしている（適用済み。[docs/workflows/github-ruleset.md](docs/workflows/github-ruleset.md)）。
+ローカルhookは回避できるので、mainのRulesetで`Completion Judge`の成功とPR経由を必須にしている（適用済み。[docs/workflows/github-ruleset.md](docs/workflows/github-ruleset.md)）。
 hook・CI・Harnessのどれにもmerge機能はない。

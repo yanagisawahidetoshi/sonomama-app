@@ -25,8 +25,8 @@ GitHubはHarnessのMERGE_ALLOWEDを参照しない。Rulesetで止められる�
 | deletion | 有効 | mainを削除できないようにする |
 | non_fast_forward | 有効 | force pushで履歴を書き換えられないようにする |
 | pull_request | 必要な承認は0人 | mainへの直接pushを止め、PR経由だけにする。人数は下の表のとおりHarnessに任せる |
-| required_status_checks | `harness`（GitHub Actions、`integration_id: 15368`） | CIのCompletion Judgeが成功したPRだけmergeできるようにする |
-| strict_required_status_checks_policy | 無効 | Harnessは、mainの先頭がrunのbaselineと一致することを自分で確かめる。これはGitHubの「branchを最新にする」より強い条件なので、二重には要求しない |
+| required_status_checks | `Completion Judge`（GitHub Actions、`integration_id: 15368`） | mainのHarnessで判定するCompletion Judge（ADR-0008）が成功したPRだけmergeできるようにする |
+| strict_required_status_checks_policy | 無効 | mainが進んだだけでPRへのmain取り込みとCIの再実行を求めない（#288）。conflictが出たときだけ取り込む。merge後のmainへのpushで全量を検証する。Harness runは、mainの先頭がrunのbaselineと一致することを自分で確かめる |
 | bypass_actors | なし | 管理者も含めて例外を作らない。緊急時の扱いは下に書く |
 
 `harness`は`.github/workflows/harness.yml`のjob idで、GitHubのcheck名もこの名前になる。job idを変えると、Rulesetの必須チェックと一致しなくなり、どのPRもmergeできなくなる。`integration_id`を指定しているので、GitHub Actions以外のGitHub Appが同じ名前のcheckを報告しても、必須チェックを満たしたことにはならない。Harnessも、Rulesetの必須チェックと`integration_id`を読んで判定に加える。
