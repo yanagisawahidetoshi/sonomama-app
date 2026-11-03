@@ -4,12 +4,13 @@ import { randomUUID, createHash } from 'node:crypto';
 import { check } from './check.mjs';
 import { json, evidenceText } from './io.mjs';
 import { runAgent } from './agents/index.mjs';
-import { planResponseSchema, planJsonSchema } from './schemas.mjs';
+import { planResponseSchema, planJsonSchema, providerTimeoutMs } from './schemas.mjs';
 import { judgePlan, creationOrder, limits } from './planner-judge.mjs';
 import { githubCli } from './planner-github.mjs';
 import { withEvidenceProtection, redactText, hasSecret } from './evidence-protection.mjs';
+import { planOf, planDigest, writePlanSection } from './pbi-plan.mjs';
 
-// Every generated SBI carries both labels. A human removes needs-review and adds ready; the Planner never does.
+// Every generated SBI carries both labels. A human replaces needs-review with spec-approved (or ready); the Planner never does.
 export const sbiLabels = Object.freeze(['sbi', 'needs-review']);
 
 // Deterministic markers make re-runs idempotent: an SBI Issue is keyed by PBI URL + SBI ID + content digest, the PBI comment by PBI URL.
@@ -17,7 +18,7 @@ export const sbiLabels = Object.freeze(['sbi', 'needs-review']);
 const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
 export const sbiDigest = sbi => createHash('sha256').update(JSON.stringify(stable(sbi))).digest('hex');
 export const sbiMarker = (pbiUrl, id, digest) => `<!-- sonomama-sbi pbi=${pbiUrl} id=${id} digest=${digest} -->`;
-const markerPattern = /<!-- sonomama-sbi pbi=(\S+) id=(SBI-\d{3})(?: digest=([0-9a-f]{64}))? -->/;
+export const markerPattern = /<!-- sonomama-sbi pbi=(\S+) id=(SBI-\d{3})(?: digest=([0-9a-f]{64}))? -->/;
 export const listMarker = pbiUrl => `<!-- sonomama-sbi-list pbi=${pbiUrl} -->`;
 export function parseIssueUrl(url) {
   const match = /^https:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)\/([A-Za-z0-9_.-]+)\/issues\/([1-9]\d*)\/?$/.exec(String(url).trim());
@@ -29,10 +30,12 @@ const steps = (keyword, lines) => lines.map((line, index) => `  ${index ? 'And' 
 export function renderGherkin(scenarios) {
   return scenarios.map(s => [`Scenario: ${s.name}`, ...steps('Given', s.given), ...steps('When', s.when), ...steps('Then', s.then)].join('\n')).join('\n\n');
 }
+export const kindLabels = Object.freeze({ implementation: '実装SBI', validation: '最終確認SBI' });
 export function renderSbiBody(sbi, pbi, issueNumbers = {}) {
   const security = sbi.securityImpact.filter(category => category !== 'None');
   return [
     sbiMarker(pbi.url, sbi.id, sbiDigest(sbi)),
+    '## 種類', '', `${kindLabels[sbi.kind]}（${sbi.kind}）`, '',
     '## 目的', '', sbi.purpose, '',
     '## 対象範囲', '', ...sbi.scope.included.map(item => `- ${item}`),
     ...(sbi.scope.excluded.length ? ['', '対象外:', ...sbi.scope.excluded.map(item => `- ${item}`)] : []), '',
@@ -40,8 +43,11 @@ export function renderSbiBody(sbi, pbi, issueNumbers = {}) {
     '## Gherkin', '', '```gherkin', renderGherkin(sbi.scenarios), '```', '',
     '## 依存SBI', '', ...(sbi.dependsOn.length ? sbi.dependsOn.map(id => `- ${id}${issueNumbers[id] ? ` (#${issueNumbers[id]})` : ''}`) : ['なし']), '',
     '## 想定変更範囲', '', '```text', ...sbi.changeAreas, '```', '',
+    '## レイヤー', '', sbi.layers.length ? sbi.layers.join(', ') : 'なし', '',
+    '## 想定変更ファイル数', '', String(sbi.estimatedFiles), ...(sbi.oversizeReason?.trim() ? ['', `目安${limits.estimatedFiles}ファイルを超える理由: ${sbi.oversizeReason}`] : []), '',
     '## Risk / Security Impact', '', '```text', `Risk: ${sbi.riskCandidate} candidate`, `Security: ${security.length ? security.join(', ') : 'None'}`, '```', '',
     '## 検証方法', '', '```text', `Application Test: ${sbi.verification.applicationTest}`, `受け入れ要件: ${sbi.verification.acceptance}`, `E2E: ${sbi.verification.e2e}`, '```', '',
+    '## Gherkinと実テスト', '', ...sbi.scenarios.map(s => `- ${s.name} → ${s.test}`), '',
     '## 元PBI', '', `#${pbi.number} ${pbi.title}`, '',
     '_SONOMAMA Harness Plannerが生成。最終Risk判定はExecution Harnessが行う。`needs-review`の間はExecution Harnessの対象外。_', '',
   ].join('\n');
@@ -87,7 +93,7 @@ async function planProtected({ root, issueUrl, provider, quiet, agent, github, s
     const securityCategories = [...new Set(securityPolicy.rules.flatMap(rule => rule.categories))];
     const prompt = await makePlanPrompt(root, pbi, securityCategories);
     await evidenceText(join(directory, 'prompt.txt'), prompt);
-    const response = planResponseSchema.parse(await agent({ provider, prompt, directory, workspace: root, timeoutMs: config.timeoutMs, schema: planJsonSchema }));
+    const response = planResponseSchema.parse(await agent({ provider, prompt, directory, workspace: root, timeoutMs: providerTimeoutMs(config), schema: planJsonSchema }));
     await json(join(directory, 'candidates.json'), response);
     if (response.escalation) throw new Error(`Planner escalation: ${response.escalation}`);
     summary.status = 'JUDGING'; await save();
@@ -98,7 +104,8 @@ async function planProtected({ root, issueUrl, provider, quiet, agent, github, s
     // Provider output is published outside the Harness. Reject credential-like values before any GitHub write, as the execution loop does before applying files.
     if (hasSecret(JSON.stringify(response.sbis))) throw new Error('Secret/Credential detected in planner candidates; rejected before any GitHub write');
     summary.status = 'PUBLISHING'; await save();
-    await github.ensureLabels(ref, sbiLabels);
+    // The approval labels exist so that a human can pick them on GitHub (ADR-0009); the Planner never adds them.
+    await github.ensureLabels(ref, [...sbiLabels, 'spec-approved', 'plan-approved']);
     // The marker only finds candidates. Reuse requires the Issue, as it exists now, to be exactly what this run generated and still awaiting review.
     const existing = new Map((await github.listIssues(ref, sbiLabels[0])).flatMap(issue => { const match = markerPattern.exec(issue.body || ''); return match && match[1] === ref.url ? [[match[2], { issue, digest: match[3] || null }]] : []; }));
     const normalize = text => String(text ?? '').replaceAll('\r\n', '\n').trimEnd();
@@ -128,6 +135,11 @@ async function planProtected({ root, issueUrl, provider, quiet, agent, github, s
       await json(join(directory, 'issues.json'), { created: summary.created, comment: null });
       await save(); log(`${reuse ? 'Reused' : 'Created'} #${issue.number} ${title}`);
     }
+    // The complete SBI set goes into the PBI body as ## SBI構成; a human approves it with the plan-approved label.
+    const plan = planOf(ref.number, summary.created.map(c => { const sbi = response.sbis.find(s => s.id === c.sbiId); return { id: c.sbiId, number: c.number, kind: sbi.kind, dependsOn: sbi.dependsOn }; }));
+    // Re-read the PBI just before writing: a human may have edited it while the provider ran, and that edit must not be overwritten.
+    await writePlanSection({ ref, issue: await github.fetchIssue(ref), plan, github });
+    summary.planDigest = planDigest(plan); await save();
     const comment = renderGeneratedComment(summary.created, pbi);
     if (hasSecret(comment)) throw new Error('Secret/Credential detected in PBI comment; rejected before any GitHub write');
     const previous = (await github.listComments(ref)).find(c => (c.body || '').includes(listMarker(ref.url)));

@@ -18,7 +18,7 @@ export function healthMetrics(summary) {
   const security = summary.securityAssessment ?? null;
   const merge = summary.merge ?? {};
   // Only the code is observation data. The human-facing reason text stays in escalation.json and may carry PII.
-  const escalation = summary.executionStatus === 'ESCALATED' ? { code: summary.escalation?.code ?? 'UNKNOWN' } : null;
+  const escalation = summary.status === 'ESCALATED' || summary.executionStatus === 'ESCALATED' ? { code: summary.escalation?.code ?? 'UNKNOWN' } : null;
   return {
     version: healthMetricsVersion,
     runId: summary.id, sbiId: summary.sbi ?? null, lane: summary.lane?.name ?? null, provider: summary.provider ?? null,
@@ -41,7 +41,6 @@ export function healthMetrics(summary) {
       verification: count(last?.securityVerification?.checks),
     },
     approvals: {
-      design: { required: summary.designApproval?.required === true, state: summary.designApproval?.state ?? 'NOT_REQUIRED' },
       implementationGate: { required: summary.gate?.required === true, state: summary.gate?.state ?? 'NOT_REQUIRED' },
       merge: { required: merge.requiredApprovals ?? null, valid: merge.validApprovals ?? null, requestedChanges: merge.reasons?.includes('human_requested_changes') === true },
     },

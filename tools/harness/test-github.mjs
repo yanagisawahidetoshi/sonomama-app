@@ -1,0 +1,153 @@
+import { mkdtemp, writeFile, chmod, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { exists, readJson } from './io.mjs';
+
+// Stub gh on PATH. It answers `gh api` calls for acme/app from a state directory and records every call.
+export const githubMock = defaults => async (state, test) => {
+  const dir = await mkdtemp(join(tmpdir(), 'harness-gh-'));
+  const previous = { PATH: process.env.PATH, GH_MOCK_DIR: process.env.GH_MOCK_DIR, GITHUB_STEP_SUMMARY: process.env.GITHUB_STEP_SUMMARY };
+  try {
+    await writeFile(join(dir, 'state.json'), JSON.stringify({ labels: [], created: [], comments: [], failOnCreate: null, pulls: [], reviews: {}, checkRuns: {}, rules: [], permissions: {}, blockedBy: {}, contents: {}, workflowRuns: {}, runArtifacts: {}, artifactFiles: {}, artifactZips: {}, viewer: 'harness-operator', bare: null, ...defaults, ...state }));
+    await writeFile(join(dir, 'gh'), `#!${process.execPath}
+      const fs = require('node:fs'), path = require('node:path');
+      const dir = process.env.GH_MOCK_DIR, file = path.join(dir, 'state.json');
+      const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const args = process.argv.slice(2);
+      const input = args.includes('--input') ? fs.readFileSync(0, 'utf8') : '';
+      fs.appendFileSync(path.join(dir, 'calls.jsonl'), JSON.stringify({ args, input }) + '\\n');
+      if (args[0] === 'run' && args[1] === 'download') {
+        const files = (state.artifactFiles[args[2]] || {})[args[args.indexOf('-n') + 1]];
+        if (!files || args[args.indexOf('-R') + 1] !== 'acme/app') { process.stderr.write('no artifact matches\\n'); process.exit(1); }
+        const out = args[args.indexOf('-D') + 1]; fs.mkdirSync(out, { recursive: true });
+        for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(out, name), text);
+        process.exit(0);
+      }
+      if (args[0] === 'api' && args.includes('graphql')) {
+        const { variables } = JSON.parse(input), edits = (state.issueEdits || {})[variables.number] || [];
+        const start = variables.after ? Number(variables.after) : 0, nodes = edits.slice(start, start + 100);
+        // GitHub reports the newest edit as lastEditedAt; edits are newest first.
+        const lastEditedAt = (state.issueLastEditedAt || {})[variables.number] ?? (edits[0] ? edits[0].editedAt : null);
+        fs.appendFileSync(path.join(dir, 'calls.jsonl'), '');
+        process.stdout.write(JSON.stringify({ data: { repository: { issue: { lastEditedAt, userContentEdits: { nodes, pageInfo: { hasNextPage: start + 100 < edits.length, endCursor: String(start + 100) } } } } } }));
+        process.exit(0);
+      }
+      const method = args.includes('-X') ? args[args.indexOf('-X') + 1] : 'GET';
+      const [endpoint, query = ''] = args.find(a => a.startsWith('repos/')).split('?');
+      const params = Object.fromEntries(new URLSearchParams(query));
+      const page = list => { const size = Number(params.per_page || 30), index = Number(params.page || 1); return list.slice((index - 1) * size, index * size); };
+      const fail = (message, code = 1) => { process.stderr.write(message + '\\n'); process.exit(code); };
+      const issueByNumber = number => number === state.issue.number ? state.issue : state.created.find(i => i.number === number);
+      if (args[0] !== 'api') fail('unexpected gh command');
+      if (state.failOnCreate && method === 'POST' && endpoint === 'repos/acme/app/issues' && state.created.length + 1 === state.failOnCreate) {
+        state.failOnCreate = null; fs.writeFileSync(file, JSON.stringify(state)); fail('gh: Validation Failed (HTTP 422)');
+      }
+      let m;
+      if (method === 'GET' && endpoint === 'repos/acme/app/issues') {
+        if (!params.labels) fail('label filter required');
+        process.stdout.write(JSON.stringify(page(state.created.filter(i => i.labels.some(l => l.name === params.labels)))));
+      } else if (method === 'GET' && (m = endpoint.match(/^repos\\/acme\\/app\\/issues\\/(\\d+)\\/comments$/))) {
+        process.stdout.write(JSON.stringify(page(state.comments.filter(c => c.issue === Number(m[1])))));
+      } else if (method === 'PATCH' && (m = endpoint.match(/^repos\\/acme\\/app\\/issues\\/comments\\/(\\d+)$/))) {
+        const comment = state.comments.find(c => c.id === Number(m[1])); if (!comment) fail('gh: Not Found (HTTP 404)');
+        comment.body = JSON.parse(input).body; comment.updated = (comment.updated || 0) + 1; process.stdout.write(JSON.stringify(comment));
+      } else if (method === 'POST' && (m = endpoint.match(/^repos\\/acme\\/app\\/issues\\/(\\d+)\\/labels$/))) {
+        const issue = issueByNumber(Number(m[1])); if (!issue) fail('gh: Not Found (HTTP 404)');
+        for (const name of JSON.parse(input).labels) { if (!state.labels.includes(name)) fail('gh: Validation Failed (HTTP 422): label ' + name + ' does not exist'); if (!issue.labels.some(l => l.name === name)) issue.labels.push({ name }); }
+        process.stdout.write(JSON.stringify(issue.labels));
+      } else if (method === 'DELETE' && (m = endpoint.match(/^repos\\/acme\\/app\\/issues\\/(\\d+)\\/labels\\/(.+)$/))) {
+        const issue = issueByNumber(Number(m[1])), name = decodeURIComponent(m[2]);
+        if (!issue || !issue.labels.some(l => l.name === name)) fail('gh: Label does not exist (HTTP 404)');
+        issue.labels = issue.labels.filter(l => l.name !== name); process.stdout.write(JSON.stringify(issue.labels));
+      } else if (method === 'GET' && (m = endpoint.match(/^repos\\/acme\\/app\\/contents\\/(.+)$/))) {
+        const text = (state.contents[params.ref] || {})[decodeURIComponent(m[1])];
+        if (text === undefined) fail('gh: Not Found (HTTP 404)');
+        process.stdout.write(JSON.stringify({ type: 'file', encoding: 'base64', content: Buffer.from(text).toString('base64') }));
+      } else if (method === 'GET' && endpoint === 'repos/acme/app/actions/runs') {
+        const runs = state.workflowRuns[params.check_suite_id] || [];
+        process.stdout.write(JSON.stringify({ total_count: runs.length, workflow_runs: page(runs) }));
+      } else if (method === 'GET' && (m = endpoint.match(/^repos\\/acme\\/app\\/actions\\/artifacts\\/(\\d+)\\/zip$/))) {
+        if (!state.artifactZips[m[1]]) fail('gh: Not Found (HTTP 404)');
+        process.stdout.write(Buffer.from(state.artifactZips[m[1]], 'base64'));
+      } else if (method === 'GET' && (m = endpoint.match(/^repos\\/acme\\/app\\/actions\\/runs\\/(\\d+)\\/artifacts$/))) {
+        const artifacts = state.runArtifacts[m[1]] || [];
+        process.stdout.write(JSON.stringify({ total_count: artifacts.length, artifacts: page(artifacts) }));
+      } else if (method === 'GET' && (m = endpoint.match(/^repos\\/acme\\/app\\/issues\\/(\\d+)\\/dependencies\\/blocked_by$/))) {
+        process.stdout.write(JSON.stringify(page(state.blockedBy[m[1]] || [])));
+      } else if (method === 'GET' && (m = endpoint.match(/^repos\\/acme\\/app\\/issues\\/(\\d+)\\/timeline$/))) {
+        // Without issueTimelines, sbi-approver (a person with write access) added the labels of the Issue before any edit (issueEdits),
+        // as a human marks an SBI ready and leaves it.
+        const issue = state.issue && issueByNumber(Number(m[1]));
+        const labeled = issue ? issue.labels.map(l => ({ event: 'labeled', label: { name: l.name }, created_at: '2026-01-01T00:00:00Z', actor: { login: 'sbi-approver', type: 'User' } })) : [];
+        process.stdout.write(JSON.stringify(page((state.issueTimelines || {})[m[1]] || labeled)));
+      } else if (method === 'PATCH' && (m = endpoint.match(/^repos\\/acme\\/app\\/issues\\/(\\d+)$/))) {
+        const issue = issueByNumber(Number(m[1])); if (!issue) fail('gh: Not Found (HTTP 404)');
+        Object.assign(issue, JSON.parse(input)); process.stdout.write(JSON.stringify(issue));
+      } else if (method === 'GET' && (m = endpoint.match(/^repos\\/acme\\/app\\/issues\\/(\\d+)$/))) {
+        if (Number(m[1]) !== state.issue.number) fail('gh: Not Found (HTTP 404)');
+        process.stdout.write(JSON.stringify(state.issue));
+      } else if (method === 'GET' && (m = endpoint.match(/^repos\\/acme\\/app\\/labels\\/(.+)$/))) {
+        const name = decodeURIComponent(m[1]);
+        if (!state.labels.includes(name)) fail('gh: Not Found (HTTP 404)');
+        process.stdout.write(JSON.stringify({ name }));
+      } else if (method === 'POST' && endpoint === 'repos/acme/app/labels') {
+        const label = JSON.parse(input); state.labels.push(label.name); process.stdout.write(JSON.stringify(label));
+      } else if (method === 'POST' && endpoint === 'repos/acme/app/issues') {
+        const issue = JSON.parse(input); const number = 101 + state.created.length;
+        const created = { number, title: issue.title, body: issue.body, state: 'open', html_url: 'https://github.com/acme/app/issues/' + number, labels: (issue.labels || []).map(name => ({ name })) };
+        state.created.push(created); process.stdout.write(JSON.stringify(created));
+      } else if (method === 'POST' && (m = endpoint.match(/^repos\\/acme\\/app\\/issues\\/(\\d+)\\/comments$/))) {
+        const id = 1 + state.comments.length;
+        const comment = { id, issue: Number(m[1]), body: JSON.parse(input).body, html_url: 'https://github.com/acme/app/issues/' + m[1] + '#issuecomment-' + id };
+        state.comments.push(comment); process.stdout.write(JSON.stringify(comment));
+      } else if (method === 'GET' && endpoint === 'repos/acme/app/pulls') {
+        process.stdout.write(JSON.stringify(page(state.pulls.filter(p => 'acme:' + p.head.ref === params.head && (params.state === 'all' || p.state === (params.state || 'open'))))));
+      } else if (method === 'POST' && endpoint === 'repos/acme/app/pulls') {
+        const body = JSON.parse(input), number = 201 + state.pulls.length;
+        // The head SHA is whatever the pushed branch points to in the bare remote.
+        const sha = require('node:child_process').execFileSync('git', ['--git-dir', state.bare, 'rev-parse', 'refs/heads/' + body.head], { encoding: 'utf8' }).trim();
+        const baseSha = require('node:child_process').execFileSync('git', ['--git-dir', state.bare, 'rev-parse', 'refs/heads/' + body.base], { encoding: 'utf8' }).trim();
+        const pull = { number, title: body.title, body: body.body, state: 'open', merged: false, html_url: 'https://github.com/acme/app/pull/' + number, user: { login: state.viewer, type: 'User' }, head: { ref: body.head, sha, repo: { full_name: 'acme/app' } }, base: { ref: body.base, sha: baseSha } };
+        state.pulls.push(pull); process.stdout.write(JSON.stringify(pull));
+      } else if (method === 'GET' && (m = endpoint.match(/^repos\\/acme\\/app\\/pulls\\/(\\d+)$/))) {
+        const pull = state.pulls.find(p => p.number === Number(m[1])); if (!pull) fail('gh: Not Found (HTTP 404)');
+        // livePulls: the head follows the pushed branch, and a push refreshes base.sha to the merge base, as PR #131 showed on GitHub.
+        if (state.livePulls) {
+          const sha = args => require('node:child_process').execFileSync('git', ['--git-dir', state.bare, ...args], { encoding: 'utf8' }).trim();
+          pull.head.sha = sha(['rev-parse', 'refs/heads/' + pull.head.ref]);
+          pull.base.sha = sha(['merge-base', 'refs/heads/' + pull.base.ref, pull.head.sha]);
+        }
+        process.stdout.write(JSON.stringify(pull));
+      } else if (method === 'PATCH' && (m = endpoint.match(/^repos\\/acme\\/app\\/pulls\\/(\\d+)$/))) {
+        const pull = state.pulls.find(p => p.number === Number(m[1])); if (!pull) fail('gh: Not Found (HTTP 404)');
+        Object.assign(pull, JSON.parse(input)); process.stdout.write(JSON.stringify(pull));
+      } else if (method === 'GET' && (m = endpoint.match(/^repos\\/acme\\/app\\/pulls\\/(\\d+)\\/reviews$/))) {
+        process.stdout.write(JSON.stringify(page(state.reviews[m[1]] || [])));
+      } else if (method === 'GET' && (m = endpoint.match(/^repos\\/acme\\/app\\/commits\\/([0-9a-f]+)\\/check-runs$/))) {
+        const runs = state.checkRuns[m[1]] || [];
+        process.stdout.write(JSON.stringify({ total_count: runs.length, check_runs: page(runs) }));
+      } else if (method === 'GET' && (m = endpoint.match(/^repos\\/acme\\/app\\/collaborators\\/([^/]+)\\/permission$/))) {
+        const login = decodeURIComponent(m[1]), permission = state.permissions[login] ?? (login === 'sbi-approver' ? 'write' : undefined);
+        if (permission === 'forbidden') fail('gh: Must have push access to view collaborator permission. (HTTP 403)');
+        process.stdout.write(JSON.stringify({ permission: permission ?? 'none', role_name: permission ?? '' }));
+      } else if (method === 'GET' && (m = endpoint.match(/^repos\\/acme\\/app\\/rules\\/branches\\/(.+)$/))) {
+        process.stdout.write(JSON.stringify(page(state.rules)));
+      } else fail('unexpected gh api call: ' + method + ' ' + endpoint);
+      fs.writeFileSync(file, JSON.stringify(state));
+    `);
+    await chmod(join(dir, 'gh'), 0o755);
+    process.env.PATH = `${dir}:${previous.PATH}`;
+    process.env.GH_MOCK_DIR = dir;
+    delete process.env.GITHUB_STEP_SUMMARY;
+    const github = {
+      state: () => readJson(join(dir, 'state.json')),
+      update: async fn => { const value = await readJson(join(dir, 'state.json')); fn(value); await writeFile(join(dir, 'state.json'), JSON.stringify(value)); },
+      calls: async () => (await exists(join(dir, 'calls.jsonl'))) ? (await readFile(join(dir, 'calls.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line)) : [],
+      dir,
+    };
+    await test(github);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    await rm(dir, { recursive: true, force: true });
+  }
+};

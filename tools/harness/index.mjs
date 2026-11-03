@@ -1,70 +1,100 @@
-import { mkdir, writeFile, realpath, readFile, lstat } from 'node:fs/promises';
+import { describePhases } from './isolation.mjs';
+import { mkdir, writeFile, realpath, readFile, readdir, lstat } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { check } from './check.mjs';
 import { json, readJson, exists, evidenceText } from './io.mjs';
-import { responseSchema } from './schemas.mjs';
+import { providerTimeoutMs, responseSchema, runIdSchema } from './schemas.mjs';
 import { runAgent, makePrompt, providerCommand } from './agents/index.mjs';
 import { verify, checksPassed } from './verifier.mjs';
 import { review } from './reviewer.mjs';
 import { judge } from './completion-judge.mjs';
-import { humanGate, classifyEscalation } from './escalation.mjs';
+import { humanGate, classifyEscalation, mergeFailure, needsHumanDecision } from './escalation.mjs';
+import { runAiReview } from './ai-review.mjs';
 import { assessRisk } from './risk-classifier.mjs';
-import { mergeDecision, validHumanApprovals } from './merge-policy.mjs';
-import { authenticatedRecords } from './human-approvals.mjs';
-import { classifySecurity, verifySecurity, combineSecurity, securityPassed } from './security-enforcement.mjs';
-import { withEvidenceProtection, redact, redactText, hasSecret, assertSafeInput } from './evidence-protection.mjs';
-import { digest, prepareWorkspace, commitWorkspace, changedFiles, workspaceIntegrity, toolFingerprint, assertWritablePath, workspaceFingerprint, sourceIntegrity, assertWorktreeOwner, git } from './workspace.mjs';
-import { saveRun, loadRun, runPaths, withRunLock } from './run-store.mjs';
+import { mergeDecision } from './merge-policy.mjs';
+import { authenticatedRecords, recordDecision, waitsForIssue } from './human-approvals.mjs';
+import { classifySecurity, verifySecurity, combineSecurity, securityPassed, localTargets } from './security-enforcement.mjs';
+import { withEvidenceProtection, redact, redactText, hasSecret, assertSafeInput, isSecretPath } from './evidence-protection.mjs';
+import { githubPrCli, githubState, pullRequestBody } from './github-pr.mjs';
+import { digest, prepareWorkspace, commitWorkspace, changedFiles, workspaceIntegrity, toolFingerprint, assertWritablePath, workspaceFingerprint, sourceIntegrity, assertWorktreeOwner, assertSafeCommit, git } from './workspace.mjs';
+import { saveRun, loadRun, readRunState, runPaths, withRunLock } from './run-store.mjs';
 import { classifyLane } from './lanes.mjs';
 import { assertState } from './state-machine.mjs';
+import { loadSbiIssue, inScope } from './sbi-issue.mjs';
+import { generateAcceptance, isGeneratedAcceptanceInput, isGeneratedRegistrationPath } from './acceptance-generation.mjs';
+import { judgeDetection, runGeneratedAcceptance } from './acceptance-run.mjs';
+import { inspectViolation, judgeViolation, parseViolationAnswer, violationContext, violationPrompt, violationResponseSchema, withViolationCopy } from './acceptance-violation.mjs';
+import { snapshotFromIssue, snapshotPath, riskView, snapshotVerified, snapshotMismatch } from './sbi-source.mjs';
+import { verifyReverifyLink, committedSnapshot, parsePullUrl, reverifyTrailers, mergeTree, gitVersion } from './reverify.mjs';
+import { parseIssueUrl } from './planner.mjs';
+import { githubCli } from './planner-github.mjs';
 export { check, judge, providerCommand };
 
 function controller(root, summary, quiet) {
   const directory = runPaths(root, summary.id).directory;
-  const transition = async (status, detail = '', phase = 'execution') => {
-    assertState(phase === 'implementation-gate' ? 'gate' : phase === 'design-approval' ? 'design' : phase, status);
+  const record = async (status, detail, phase) => {
     summary.status = status;
-    if (phase === 'execution') summary.executionStatus = status;
-    if (phase === 'merge') summary.merge = { ...summary.merge, state: status, decision: status, autoMergeEligible: status === 'MERGE_ALLOWED' && summary.merge.autoMergeEligible === true };
     summary.events.push({ status, phase, detail, at: new Date().toISOString() });
     if (!quiet) console.log(redactText(`[${summary.id}] ${status}${detail ? `: ${detail}` : ''}`));
     await saveRun(root, summary);
   };
+  const transition = async (status, detail = '', phase = 'execution') => {
+    assertState(phase === 'implementation-gate' ? 'gate' : phase, status);
+    if (phase === 'execution') summary.executionStatus = status;
+    if (phase === 'merge') summary.merge = { ...summary.merge, state: status, decision: status, autoMergeEligible: status === 'MERGE_ALLOWED' && summary.merge.autoMergeEligible === true };
+    await record(status, detail, phase);
+  };
+  // After Execution DONE an escalation stops only the merge lifecycle; executionStatus stays DONE.
+  // A decision the approved SBI cannot settle (#175) is NEEDS_HUMAN_DECISION: the human updates the SBI, approves it again and starts a new run.
   const escalate = async (reason, code = classifyEscalation(reason)) => {
+    const done = summary.executionStatus === 'DONE';
+    const decision = needsHumanDecision(code) ? { decision: 'NEEDS_HUMAN_DECISION' } : {};
     summary.reason = reason;
-    summary.escalation = { code, detail: reason };
-    summary.merge = { ...summary.merge, state: 'BLOCKED', decision: 'BLOCKED', autoMergeEligible: false };
-    await json(join(directory, 'escalation.json'), { reason, code, action: '人間が原因を確認して新しいrunを開始してください。mergeは実行しません。' });
-    await transition('ESCALATED', reason);
+    summary.escalation = { code, detail: reason, ...decision };
+    summary.merge = { ...summary.merge, state: 'BLOCKED', decision: 'BLOCKED', autoMergeEligible: false, ...(done ? { failure: { code, retryable: false, detail: reason } } : {}) };
+    await json(join(directory, 'escalation.json'), { reason, code, ...decision, action: decision.decision
+      ? '承認済みSBIでは決められない判断です。人間が判断し、SBIを更新し、再承認後に新しいrunで再開してください。このrunは再開せず、mergeは実行しません。'
+      : '人間が原因を確認して新しいrunを開始してください。mergeは実行しません。' });
+    if (done) await record('ESCALATED', reason, 'merge'); else await transition('ESCALATED', reason);
     return summary;
   };
-  return { transition, escalate };
+  const defer = async (reason, code) => {
+    summary.reason = reason;
+    summary.merge = { state: 'RETRYABLE', decision: 'RETRYABLE', autoMergeEligible: false, reasons: ['merge_assessment_failed'], failure: { code, retryable: true, detail: reason } };
+    await json(join(directory, 'merge-decision.json'), summary.merge);
+    await transition('RETRYABLE', `${code}; 原因を解消してharness:resume --run ${summary.id}で再判定してください`, 'merge');
+    return summary;
+  };
+  return { transition, escalate, defer };
 }
 function metadata(sbi) {
   return { id: sbi.id, title: sbi.title, description: sbi.description, risks: sbi.risks, acceptanceCriteria: sbi.acceptanceCriteria, securityImpact: sbi.securityImpact, requiredSecurityRules: sbi.requiredSecurityRules, requiredVerifiers: sbi.requiredVerifiers, minimumRiskLevel: sbi.minimumRiskLevel };
 }
-async function resolveGate(root, summary) {
-  if (!summary.gate.required && !summary.designApproval?.required) return true;
-  const records = await authenticatedRecords(root, summary.id);
-  if (summary.designApproval?.required) {
-    const design = validHumanApprovals(records, { purpose:'design-approval', headSha:summary.baselineSha, contextDigest:summary.designApproval.contextDigest });
-    summary.designApproval.state = design.rejected ? 'REJECTED' : design.approvals.length ? 'APPROVED' : 'WAITING_FOR_DESIGN_APPROVAL';
-    summary.lane.designApproved = summary.designApproval.state === 'APPROVED';
-  }
-  if (summary.gate.required) {
-    const { approvals, rejected } = validHumanApprovals(records, { purpose: 'implementation-gate', headSha: summary.gate.headSha, contextDigest: summary.gate.contextDigest });
-    summary.gate.state = rejected ? 'REJECTED' : approvals.length ? 'APPROVED' : 'WAITING_FOR_HUMAN_GATE';
-    summary.gate.reviewers = approvals.map(a => a.reviewer);
-    summary.gate.approvalState = summary.gate.state === 'WAITING_FOR_HUMAN_GATE' ? 'WAITING_FOR_HUMAN_APPROVAL' : summary.gate.state;
-  }
-  const { directory } = runPaths(root,summary.id);
-  await json(join(directory,'design-approval.json'),summary.designApproval);
-  await json(join(directory,'human-gate.json'),summary.gate);
-  return (!summary.designApproval?.required || summary.designApproval.state === 'APPROVED')
-    && (!summary.gate.required || summary.gate.state === 'APPROVED');
+// #175: an approved SBI starts implementing without an implementation gate. Only a run an older Harness stopped at that gate keeps it,
+// and such a run never resumes (resumeProtected). A gate approved before execution still counts for that run's completed execution.
+const gateCleared = summary => !summary.gate.required || summary.gate.state === 'APPROVED';
+// A Human Gate risk the approved SBI declared keeps level 3 and two humans after implementation. Runs from before #175 kept it as gate.required.
+const humanGateRisk = summary => summary.humanGateRisk ?? summary.gate.required;
+// PR mode reads GitHub on every assessment. A read failure blocks; it never reuses an earlier GitHub state or escalates the run.
+async function readGitHub(root, summary, inputs, github) {
+  if (!summary.pullRequest) return null;
+  const [owner, repo] = summary.pullRequest.repository.split('/');
+  try {
+    return await githubState({ github, root, remote: inputs.config.github.remote, repository: { owner, repo }, pullRequest: summary.pullRequest, headSha: summary.headSha, requiredChecks: inputs.config.github.requiredChecks });
+  } catch (error) { return { unavailable: redactText(error.message) }; }
 }
-async function assessMerge(root, summary, inputs, quiet) {
+// Files as Risk and Security see them. The Run snapshot of an SBI Issue counts by its values only while it is verified now.
+async function riskFiles(root, summary, inputs, files) {
+  const snapshot = inputs.sbiSnapshot;
+  if (!snapshot) return files;
+  const check = await snapshotVerified({ workspace: runPaths(root, summary.id).workspace, base: summary.baselineSha, files, snapshot, config: inputs.config });
+  summary.snapshotVerification = { ...check, headSha: summary.headSha, at: new Date().toISOString() };
+  await json(join(runPaths(root, summary.id).directory, 'sbi-source.json'), summary.snapshotVerification);
+  return riskView(files, { snapshot, verified: check.verified });
+}
+async function assessMerge(root, summary, inputs, quiet, github = githubPrCli) {
   const { directory, workspace } = runPaths(root, summary.id);
   const { transition } = controller(root, summary, quiet);
   await sourceIntegrity(root, summary.baselineSha);
@@ -75,9 +105,11 @@ async function assessMerge(root, summary, inputs, quiet) {
   const files = await changedFiles(workspace, summary.baselineSha, summary.headSha);
   await json(join(directory, 'changes.json'), { baselineSha: summary.baselineSha, headSha: summary.headSha, files });
   const last = summary.iterations.at(-1);
-  summary.securityAssessment = combineSecurity(summary.securityAssessment, classifySecurity({ files, sbi: inputs.sbi }, inputs.securityPolicy));
+  const assessed = await riskFiles(root, summary, inputs, files);
+  // Each assessment starts from the execution's assessment, so a snapshot verified earlier but not now cannot keep a lower level.
+  summary.securityAssessment = combineSecurity(summary.executionSecurityAssessment ?? summary.securityAssessment, classifySecurity({ files: assessed, sbi: inputs.sbi }, inputs.securityPolicy));
   await json(join(directory, 'security-assessment.json'), { ...summary.securityAssessment, headSha: summary.headSha });
-  summary.risk = assessRisk({ files, metadata: metadata(inputs.sbi), humanGate: summary.gate.required, aiRisk: last.semanticReview?.riskLevel ?? null, securityAssessment: summary.securityAssessment, lane:summary.lane }, inputs.riskPolicy);
+  summary.risk = assessRisk({ files: assessed, metadata: metadata(inputs.sbi), humanGate: humanGateRisk(summary), aiRisk: last.semanticReview?.riskLevel ?? null, securityAssessment: summary.securityAssessment, lane:summary.lane }, inputs.riskPolicy);
   await json(join(directory, 'risk-assessment.json'), { ...summary.risk, phase: 'post-execution', headSha: summary.headSha, inputsDigest: summary.inputsDigest });
   const securityVerification = last.securityVerification;
   if (summary.securityAssessment.requiredVerifiers.some(id => !securityVerification.requiredVerifiers.includes(id))) throw new Error('Required security checks changed; re-verification required');
@@ -86,38 +118,94 @@ async function assessMerge(root, summary, inputs, quiet) {
     { id: 'policy-review', required: true, status: last.review.status },
     last.security,
     { id: 'completion', required: true, status: last.completion ? 'PASS' : 'FAIL' },
-    ...(inputs.config.semanticReview.enabled ? [{ id: 'semantic-review', required: true, status: last.semanticReview.status }] : []),
+    { id: 'semantic-review', required: true, status: last.semanticReview?.enabled === true ? last.semanticReview.status : 'NOT_RUN', adapter: last.semanticReview?.adapter ?? null },
+    ...(summary.kind === 'reverify' ? [await reverifyLinkCheck(workspace, summary)] : []),
   ];
   const contextDigest = digest({ headSha: summary.headSha, workspaceDigest: summary.workspaceDigest, inputsDigest: summary.inputsDigest, risk: summary.risk, checks, iterations: summary.iterations });
   const records = await authenticatedRecords(root, summary.id);
-  const gateApproved = await resolveGate(root, summary);
+  const githubPr = await readGitHub(root, summary, inputs, github);
+  if (githubPr) await json(join(directory, 'github-state.json'), redact({ ...githubPr, readAt: new Date().toISOString(), source: 'GitHub API projection; GitHub is the source of truth' }));
   summary.merge = mergeDecision({ risk: summary.risk, checks, approvals: records, headSha: summary.headSha, contextDigest,
-    humanGate: summary.gate.required, gateApproved, securityVerification, semanticEnabled: inputs.config.semanticReview.enabled, lane:summary.lane });
+    humanGate: humanGateRisk(summary), securityVerification, lane:summary.lane, github: githubPr, fromSbiIssue: Boolean(summary.sbiIssue),
+    baseline: summary.pullRequest ? { ref: summary.pullRequest.base, sha: summary.baselineSha } : null });
   await json(join(directory, 'approvals.json'), { headSha: summary.headSha, approvals: records, source: 'authenticated local ledger; this file is not an authority' });
   await json(join(directory, 'merge-decision.json'), { ...summary.merge, checks });
   summary.reason = summary.merge.reasons.join(', ');
-  await transition(summary.merge.decision, `LEVEL ${summary.risk.level}; human approvals ${summary.merge.validApprovals}/${summary.merge.requiredApprovals}; autoMergeEligible=${summary.merge.autoMergeEligible}`, 'merge');
+  await transition(summary.merge.decision, `LEVEL ${summary.risk.level}; human approvals ${summary.merge.validApprovals}/${summary.merge.requiredApprovals} (${summary.merge.approvalSource}); autoMergeEligible=${summary.merge.autoMergeEligible}`, 'merge');
   return summary;
+}
+// Execution success and merge assessment are separate phases. A failure here never rewrites executionStatus.
+function mergeFailed(root, summary, quiet, error) {
+  const { escalate, defer } = controller(root, summary, quiet);
+  const failure = mergeFailure(error);
+  return failure.retryable ? defer(error.message, failure.code) : escalate(error.message, failure.code);
+}
+async function settleMerge(root, summary, inputs, quiet, github) {
+  try { return await assessMerge(root, summary, inputs, quiet, github); }
+  catch (error) { return mergeFailed(root, summary, quiet, error); }
+}
+// Verifier → Security → Policy Reviewer → Completion Judge on summary.headSha, already committed. Returns the escalated summary or null.
+async function verifyHead({ root, summary, inputs, result, iterDir, iteration, record, quiet, reviewer, semanticReviewer }) {
+  const { config, rules, sbi, securityPolicy } = inputs;
+  const { directory, workspace } = runPaths(root, summary.id);
+  const { transition, escalate } = controller(root, summary, quiet);
+  await transition('VERIFYING', `iteration ${iteration}`);
+  const files = await changedFiles(workspace,summary.baselineSha,summary.headSha);
+  const actualLane = classifyLane(files,sbi,inputs.lanePolicy);
+  if (summary.lane.name === 'prototype' && actualLane.name !== 'prototype') throw new Error('Prototype scope escalated; declare production/security scope in a new SBI');
+  const generalIds = new Set(config.verifiers.map(v=>v.id));
+  const securityIds = new Set([...securityPolicy.verifiers,...config.securityVerifiers].map(v=>v.id));
+  result.verification = redact(await verify({ root, workspace, config,
+    sbi:{...sbi,requiredVerifiers:sbi.requiredVerifiers.filter(id=>!securityIds.has(id) || generalIds.has(id))}, files,
+    lane:summary.lane, full:summary.fullVerification,
+    requiredVerifiers:summary.securityAssessment.requiredVerifiers.filter(id=>generalIds.has(id)),
+    acceptanceRunner: inputs.acceptanceRunner, generatedSpecDigest: summary.acceptance?.specDigest }));
+  await json(join(iterDir,'verifier-selection.json'),result.verification.checks.map(({id,selectionReasons,required,status})=>({id,selectionReasons,required,status})));
+  // #246 N1: the preflight announces and decides the gate; the completion requires the verifiers the actual diff needs, as CI does.
+  // Rules, level and approvals still never go below what the preflight found.
+  const actualSecurity = classifySecurity({files:await riskFiles(root,summary,inputs,files),sbi},securityPolicy);
+  summary.securityAssessment = { ...combineSecurity(summary.securityAssessment, actualSecurity), requiredVerifiers: actualSecurity.requiredVerifiers };
+  summary.executionSecurityAssessment = summary.securityAssessment;
+  // The committed diff, not allowedFiles alone: an SBI Issue allows directories only, and its allowedFiles is empty.
+  // The diff is classified as in CI (#184) and read whole; a file the SBI allows by name but the diff lacks is read when it exists.
+  const changed = localTargets(files, sbi.allowedFiles);
+  result.securityVerification = redact(await verifySecurity({ workspace, sbi, assessment: summary.securityAssessment, policy: securityPolicy, config, headSha:summary.headSha, verification:result.verification, changed, entries: files.length }));
+  result.security = { id:'security',required:true,status:securityPassed(result.securityVerification)?'PASS':'FAIL' };
+  result.gateApproved = gateCleared(summary);
+  await json(join(directory,'security-assessment.json'),{...summary.securityAssessment,headSha:summary.headSha});
+  await json(join(directory,'security-verification.json'),result.securityVerification);
+  await json(join(iterDir,'security-verification.json'),result.securityVerification);
+  await json(join(iterDir, 'security.json'), result.security);
+  await evidenceText(join(iterDir, 'verify.log'), JSON.stringify(result.verification, null, 2) + '\n');
+  if (result.securityVerification.checks.some(c=>c.required&&c.status==='NOT_CONFIGURED')) {
+    await record(); return escalate('Required Security Verifier is NOT_CONFIGURED; configure it before starting a new run', 'SECURITY_VERIFIER_NOT_CONFIGURED');
+  }
+  if (!quiet) for (const c of [...result.verification.checks, ...result.securityVerification.checks.filter(c => c.phases)]) console.log(`  ${c.id}: ${c.status}${c.reason ? ` (${c.reason})` : ''}${describePhases(c)}`);
+  if (result.verification.status === 'PASS' && result.security.status === 'PASS') {
+    await transition('REVIEWING', `iteration ${iteration}`);
+    result.review = redact(await reviewer({ root, workspace, sbi, rules, verification: result.verification, files }));
+    await json(join(iterDir, 'review.json'), result.review);
+    result.semanticReview = redact(await runAiReview({ provider: summary.provider, semanticReviewer, input: { root, workspace, sbi, verification: result.verification, provider: summary.provider,
+      headSha: summary.headSha, baselineSha: summary.baselineSha, files, timeoutMs: providerTimeoutMs(config) } }));
+    await json(join(iterDir, 'semantic-review.json'), result.semanticReview);
+    await transition('JUDGING', `iteration ${iteration}`);
+    result.completion = judge(result, sbi);
+  }
+  // Verifiers must not mutate the approved source tree or switch HEAD.
+  await workspaceIntegrity(workspace, summary.headSha);
+  if (await workspaceFingerprint(workspace) !== summary.workspaceDigest) throw new Error('Verifier mutated the source snapshot');
+  await record();
+  return null;
 }
 async function executeLoop({ root, summary, inputs, quiet, agent = runAgent, reviewer = review, semanticReviewer }) {
   const { config, rules, sbi, riskPolicy, securityPolicy } = inputs;
   const { directory, workspace } = runPaths(root, summary.id);
   const { transition, escalate } = controller(root, summary, quiet);
-  if (!await resolveGate(root, summary)) {
-    summary.reason = summary.gate.reason || 'Human Gate: Design Approval for prototype promotion';
-    await json(join(directory, 'design-approval.json'), summary.designApproval);
-    await json(join(directory, 'human-gate.json'), summary.gate);
-    const designWaiting = summary.designApproval?.required && summary.designApproval.state !== 'APPROVED';
-    await transition(designWaiting ? summary.designApproval.state : summary.gate.state, summary.reason, designWaiting ? 'design-approval' : 'implementation-gate');
-    return summary;
-  }
-  await json(join(directory, 'design-approval.json'), summary.designApproval);
-  await json(join(directory, 'human-gate.json'), summary.gate);
   let feedback = null;
   for (let iteration = 1; iteration <= config.maxIterations; iteration++) {
     const iterDir = join(directory, `iteration-${iteration}`);
     await mkdir(iterDir);
-    const result = { iteration, agent: null, verification: null, security: null, securityVerification: null, gateApproved: false, review: null, semanticReview: { enabled: config.semanticReview.enabled, status: 'NOT_RUN' }, completion: false };
+    const result = { iteration, agent: null, verification: null, security: null, securityVerification: null, gateApproved: false, review: null, semanticReview: { enabled: true, status: 'NOT_RUN' }, completion: false };
     summary.iterations.push(result);
     await evidenceText(join(iterDir, 'agent.log'), 'Agent started\n');
     await evidenceText(join(iterDir, 'verify.log'), 'NOT_RUN\n');
@@ -128,7 +216,7 @@ async function executeLoop({ root, summary, inputs, quiet, agent = runAgent, rev
       await transition('IMPLEMENTING', `iteration ${iteration}`);
       const prompt = await makePrompt({ root, sbi, workspace, feedback, rules });
       await evidenceText(join(iterDir, 'prompt.txt'), prompt);
-      const response = responseSchema.parse(await agent({ provider: summary.provider, iteration, prompt, directory: iterDir, workspace, timeoutMs: config.timeoutMs }));
+      const response = responseSchema.parse(await agent({ provider: summary.provider, iteration, prompt, directory: iterDir, workspace, timeoutMs: providerTimeoutMs(config) }));
       await workspaceIntegrity(workspace, summary.headSha); // Reject a CLI that edited files directly.
       await evidenceText(join(iterDir, 'agent.log'), JSON.stringify(redact(response), null, 2) + '\n');
       if (response.escalation) { result.agent = { status: 'ESCALATED', reason: response.escalation }; await record(); return escalate(response.escalation, 'AGENT_ESCALATION'); }
@@ -140,7 +228,9 @@ async function executeLoop({ root, summary, inputs, quiet, agent = runAgent, rev
       }
       for (const file of response.files) {
         assertWritablePath(file.path);
-        if (!sbi.allowedFiles.includes(file.path)) throw new Error(`scope/path violation: ${file.path}`);
+        if (!inScope(sbi, file.path)) throw new Error(`scope/path violation: ${file.path}`);
+        // The generated Trusted Acceptance and what it runs with are fixed before the implementation (#147).
+        if (summary.acceptance?.mode === 'generated' && isGeneratedAcceptanceInput(file.path)) throw new Error(`scope/path violation: ${file.path} is generated Trusted Acceptance or its spec support`);
         if (Buffer.byteLength(file.content) > rules.maxFileBytes) throw new Error(`scope file size exceeded: ${file.path}`);
         let parent = workspace;
         for (const segment of file.path.split('/')) {
@@ -149,68 +239,39 @@ async function executeLoop({ root, summary, inputs, quiet, agent = runAgent, rev
         }
       }
       if (new Set(response.files.map(f => f.path)).size !== response.files.length) throw new Error('scope duplicate path');
-      const proposedFiles = response.files.map(f => ({ path: f.path, status: 'M', added: f.content, deleted: '', binary: false }));
+      // The whole file before the proposal goes with it, so SEC-AUTH-001 can tell a new public operation from weakened authentication (#243).
+      const proposedFiles = await Promise.all(response.files.map(async f => {
+        const before = await readFile(join(workspace, f.path), 'utf8').catch(e => { if (e.code === 'ENOENT') return undefined; throw e; });
+        return { path: f.path, status: before === undefined ? 'A' : 'M', added: f.content, deleted: '', binary: false, before, after: f.content };
+      }));
       const proposedSecurity = classifySecurity({files:proposedFiles,sbi},securityPolicy);
       const newRules = proposedSecurity.matchedRules.filter(id => !summary.securityAssessment.matchedRules.includes(id));
       if (newRules.length) {
         await json(join(iterDir,'proposed-security.json'),proposedSecurity);
-        await record(); return escalate('New security scope detected before applying code; update SBI and obtain a new Human Gate', 'NEW_SECURITY_SCOPE');
+        await record(); return escalate(`New security scope before applying code: ${newRules.join(', ')} is not in the approved SBI and needs a human decision; update the SBI, get it approved again and start a new run`, 'NEW_SECURITY_SCOPE');
       }
-      const proposed = assessRisk({ files: proposedFiles, metadata: metadata(sbi), humanGate: summary.gate.required, securityAssessment: proposedSecurity, lane:classifyLane(proposedFiles,sbi,inputs.lanePolicy) }, riskPolicy);
-      if (proposed.level === 3 && !summary.gate.required) {
+      // Only a level 3 the approved SBI did not declare is a new decision; a level 3 SBI implements its own high-risk change.
+      const proposed = assessRisk({ files: proposedFiles, metadata: metadata(sbi), humanGate: humanGateRisk(summary), securityAssessment: proposedSecurity, lane:classifyLane(proposedFiles,sbi,inputs.lanePolicy) }, riskPolicy);
+      if (proposed.level === 3 && summary.riskPreflight.level < 3) {
         await json(join(iterDir, 'proposed-risk.json'), proposed);
-        await record(); return escalate('New high risk detected before applying code; declare the risk in SBI and obtain an implementation gate in a new run', 'NEW_HIGH_RISK');
+        await record(); return escalate(`New high risk before applying code: ${proposed.reasons.filter(r => r !== 'default_low').join(', ')} goes beyond the level ${summary.riskPreflight.level} the approved SBI declared; update the SBI, get it approved again and start a new run`, 'NEW_HIGH_RISK');
       }
       for (const file of response.files) { const path = join(workspace, file.path); await mkdir(dirname(path), { recursive: true }); await writeFile(path, file.content); }
-      summary.headSha = await commitWorkspace(workspace, `SBI ${sbi.id}, iteration ${iteration}`, sbi.allowedFiles);
+      // A run from an SBI Issue commits its snapshot and links itself in the trailers, as the CI SBI source check requires.
+      const snapshot = inputs.sbiSnapshot;
+      if (snapshot) { const path = join(workspace, snapshotPath(snapshot)); await mkdir(dirname(path), { recursive: true }); await writeFile(path, `${JSON.stringify(snapshot, null, 2)}\n`); }
+      const trailers = snapshot ? `\n\nHarness-Run: ${summary.id}\nSBI-Issue: ${snapshot.source.url}` : '';
+      summary.headSha = await commitWorkspace(workspace, `SBI ${sbi.id}, iteration ${iteration}${trailers}`, sbi.allowedFiles);
       summary.workspaceDigest = await workspaceFingerprint(workspace);
       result.headSha = summary.headSha;
       result.agent = { status: 'PASS', files: response.files.map(f => f.path) };
-      await transition('VERIFYING', `iteration ${iteration}`);
-      const files = await changedFiles(workspace,summary.baselineSha,summary.headSha);
-      const actualLane = classifyLane(files,sbi,inputs.lanePolicy);
-      if (summary.lane.name === 'prototype' && actualLane.name !== 'prototype') throw new Error('Prototype scope escalated; declare production/security scope in a new SBI');
-      const generalIds = new Set(config.verifiers.map(v=>v.id));
-      const securityIds = new Set([...securityPolicy.verifiers,...config.securityVerifiers].map(v=>v.id));
-      result.verification = redact(await verify({ root, workspace, config,
-        sbi:{...sbi,requiredVerifiers:sbi.requiredVerifiers.filter(id=>!securityIds.has(id) || generalIds.has(id))}, files,
-        lane:summary.lane, full:summary.fullVerification,
-        requiredVerifiers:summary.securityAssessment.requiredVerifiers.filter(id=>generalIds.has(id)) }));
-      await json(join(iterDir,'verifier-selection.json'),result.verification.checks.map(({id,selectionReasons,required,status})=>({id,selectionReasons,required,status})));
-      summary.securityAssessment = combineSecurity(summary.securityAssessment, classifySecurity({files,sbi},securityPolicy));
-      result.securityVerification = redact(await verifySecurity({ workspace, sbi, assessment: summary.securityAssessment, policy: securityPolicy, config, headSha:summary.headSha, verification:result.verification }));
-      result.security = { id:'security',required:true,status:securityPassed(result.securityVerification)?'PASS':'FAIL' };
-      result.gateApproved = await resolveGate(root,summary);
-      await json(join(directory,'security-assessment.json'),{...summary.securityAssessment,headSha:summary.headSha});
-      await json(join(directory,'security-verification.json'),result.securityVerification);
-      await json(join(iterDir,'security-verification.json'),result.securityVerification);
-      await json(join(iterDir, 'security.json'), result.security);
-      await evidenceText(join(iterDir, 'verify.log'), JSON.stringify(result.verification, null, 2) + '\n');
-      if (result.securityVerification.checks.some(c=>c.required&&c.status==='NOT_CONFIGURED')) {
-        await record(); return escalate('Required Security Verifier is NOT_CONFIGURED; configure it before starting a new run', 'SECURITY_VERIFIER_NOT_CONFIGURED');
-      }
-      if (!quiet) for (const c of result.verification.checks) console.log(`  ${c.id}: ${c.status}${c.reason ? ` (${c.reason})` : ''}`);
-      if (result.verification.status === 'PASS' && result.security.status === 'PASS') {
-        await transition('REVIEWING', `iteration ${iteration}`);
-        result.review = redact(await reviewer({ root, workspace, sbi, rules, verification: result.verification }));
-        await json(join(iterDir, 'review.json'), result.review);
-        if (config.semanticReview.enabled) {
-          result.semanticReview = semanticReviewer ? { ...await semanticReviewer({ root, workspace, sbi, verification: result.verification }), enabled: true } : { enabled: true, status: 'FAIL', reasons: ['semantic reviewer is enabled but no trusted adapter is configured'] };
-        } else result.semanticReview = { enabled: false, status: 'SKIP', reason: 'disabled by configuration' };
-        result.semanticReview = redact(result.semanticReview);
-        await json(join(iterDir, 'semantic-review.json'), result.semanticReview);
-        await transition('JUDGING', `iteration ${iteration}`);
-        result.completion = judge(result, sbi);
-      }
-      // Verifiers must not mutate the approved source tree or switch HEAD.
-      await workspaceIntegrity(workspace, summary.headSha);
-      if (await workspaceFingerprint(workspace) !== summary.workspaceDigest) throw new Error('Verifier mutated the source snapshot');
-      await record();
+      const escalated = await verifyHead({ root, summary, inputs, result, iterDir, iteration, record, quiet, reviewer, semanticReviewer });
+      if (escalated) return escalated;
       if (result.completion) {
         summary.executionFinishedAt = new Date().toISOString();
         summary.consecutiveFailures = 0;
         await transition('DONE', 'Execution: Verifier → Policy Reviewer → Completion Judge passed');
-        return await assessMerge(root, summary, inputs, quiet);
+        return await settleMerge(root, summary, inputs, quiet);
       }
       feedback = { verification: result.verification, security: result.security, securityVerification: result.securityVerification, review: result.review, semanticReview: result.semanticReview };
     } catch (error) {
@@ -228,9 +289,123 @@ async function executeLoop({ root, summary, inputs, quiet, agent = runAgent, rev
   }
   return escalate(`iteration limit (${config.maxIterations}) reached`, 'ITERATION_LIMIT');
 }
-async function runProtected({ root, provider, sbiPath, quiet = false, agent = runAgent, reviewer = review, semanticReviewer, full = false }) {
+// Lane, Security and Risk before any code is verified, from the SBI scope as the workspace holds it now. A human approved the SBI with its
+// Risk, Security Impact and scope (#175), so nothing here stops the run except a decision the SBI leaves open (ambiguous / design decision).
+async function assessPreflight(root, summary, inputs, quiet) {
+  const { rules, sbi, riskPolicy, securityPolicy, lanePolicy } = inputs;
+  const { directory, workspace } = runPaths(root, summary.id);
+  const { escalate } = controller(root, summary, quiet);
+  const baselineSha = summary.baselineSha;
+  if (sbi.ambiguous || sbi.requiresDesignDecision) return escalate(humanGate(sbi, rules), sbi.ambiguous ? 'SPEC_AMBIGUOUS' : 'DESIGN_DECISION_REQUIRED');
+  const excludedSources = await readJson(join(directory,'workspace-exclusions.json'));
+  const preflightFiles = [...await Promise.all(sbi.allowedFiles.map(async path => {
+    let added = ''; try { added = await readFile(join(workspace,path),'utf8'); } catch(e) { if(e.code!=='ENOENT') throw e; }
+    return {path,status:'M',binary:false,added,excludedSecret:excludedSources.some(f=>f.path===path)};
+  })), ...sbi.allowedDirs.map(path => ({path,status:'M',binary:false,added:'',excludedSecret:false}))];
+  summary.lane = classifyLane(preflightFiles,sbi,lanePolicy);
+  await json(join(directory,'lane-assessment.json'),summary.lane);
+  summary.securityAssessment = classifySecurity({files:preflightFiles,sbi},securityPolicy);
+  await json(join(directory,'security-assessment.json'),{...summary.securityAssessment,phase:'preflight',headSha:baselineSha});
+  await json(join(directory,'security-verification.json'),{status:'NOT_RUN',requiredVerifiers:summary.securityAssessment.requiredVerifiers,checks:[],violations:[]});
+  // A Human Gate risk or a security rule that needs a human decision was decided at SBI approval; it keeps level 3 and two humans after implementation.
+  summary.humanGateRisk = Boolean(humanGate(sbi, rules) || summary.securityAssessment.requiresPreImplementationGate);
+  const preflight = assessRisk({ files: preflightFiles, metadata: metadata(sbi), humanGate: summary.humanGateRisk, securityAssessment:summary.securityAssessment, lane:summary.lane }, riskPolicy);
+  summary.riskPreflight = preflight;
+  await json(join(directory, 'risk-preflight.json'), preflight);
+  await json(join(directory, 'risk-assessment.json'), { ...preflight, phase: 'preflight', headSha: baselineSha });
+  await json(join(directory, 'approvals.json'), { headSha: baselineSha, approvals: [], source: 'authenticated local ledger' });
+  await json(join(directory, 'merge-decision.json'), summary.merge);
+  return null;
+}
+// #147: generation → quality checks → detection (G) → registration commit, before the gate and before the implementation agent.
+// G is proven per Scenario by a failed expectation: before the implementation (the missing behavior is its own natural violation) or,
+// for a Scenario that already passes, under a controlled violation run in a disposable copy. A RED baseline is not required.
+// An attempt whose tests miss a violation or cannot be judged regenerates the tests from the same approved spec, up to maxConsecutiveFailures.
+// Nothing is committed unless G passed; the registration commit advances headSha, never baselineSha.
+async function detectScenarios({ workspace, directory, registration, sbiIssue, config, runner, violator }) {
+  const report = await runner({ workspace, sbiIssue, config });
+  if (report.error) return { environment: report.error, scenarios: [] };
+  const baseline = judgeDetection({ registration, report });
+  const scenarios = baseline.scenarios.map(s => ({ scenario: s.scenario, acceptanceIds: s.acceptanceIds, baseline: s.outcome,
+    outcome: s.outcome === 'already satisfied' ? null : s.outcome, failures: s.failures, ...(s.reason ? { reason: s.reason } : {}) }));
+  const satisfied = scenarios.filter(s => s.outcome === null);
+  // An attempt that already cannot be judged is regenerated without asking for violations.
+  if (!satisfied.length || scenarios.some(s => s.outcome === 'undeterminable')) {
+    for (const s of satisfied) Object.assign(s, { outcome: 'undeterminable', reason: 'not checked; another Scenario could not be judged' });
+    return { scenarios };
+  }
+  const carried = [];
+  for (const test of registration.tests) carried.push({ path: test.path, content: await readFile(join(workspace, test.path), 'utf8') });
+  const examplesOf = name => registration.mapping.find(m => m.scenario === name).examples.map(e => e.description);
+  const request = { prompt: violationPrompt({ sbiIssue, files: await violationContext(workspace), scenarios: satisfied.map(s => ({ ...s, examples: examplesOf(s.scenario) })) }), schema: violationResponseSchema, scenarios: satisfied.map(s => s.scenario) };
+  const answer = parseViolationAnswer(await violator(request));
+  for (const s of satisfied) {
+    const undeterminable = reason => Object.assign(s, { outcome: 'undeterminable', reason });
+    if (!answer.success) { undeterminable(`the violation answer does not match the schema: ${answer.error.issues.map(i => `${i.path.join('.')} ${i.message}`).join(', ')}`); continue; }
+    if (answer.data.escalation) { undeterminable(`no controlled violation could be made: ${answer.data.escalation}`); continue; }
+    const proposal = answer.data.violations.find(v => v.scenario === s.scenario);
+    if (!proposal) { undeterminable('no controlled violation was proposed'); continue; }
+    const inspected = await inspectViolation({ workspace, proposal });
+    s.violation = { patchDigest: inspected.patchDigest, files: inspected.files, changedLines: inspected.changedLines };
+    if (inspected.findings.length) { undeterminable(`the controlled violation was rejected: ${inspected.findings.map(f => `${f.path}: ${f.message}`).join('; ')}`); continue; }
+    const examples = examplesOf(s.scenario);
+    const violated = await withViolationCopy({ workspace, directory, carried, proposal }, copy => runner({ workspace: copy, sbiIssue, config, examples }));
+    const judged = judgeViolation({ registration, scenario: s.scenario, report: violated });
+    if (judged.outcome === 'environment') {
+      for (const rest of satisfied.filter(r => r.outcome === null)) Object.assign(rest, { outcome: 'undeterminable', reason: 'not run; the run stopped on an environment failure' });
+      return { environment: judged.reason, scenarios };
+    }
+    Object.assign(s, { outcome: judged.outcome, ...(judged.failures ? { failures: judged.failures } : {}), ...(judged.reason ? { reason: judged.reason } : {}) });
+  }
+  return { scenarios };
+}
+async function prepareGeneratedAcceptance({ root, summary, inputs, source, quiet, acceptanceAgent, violationAgent, acceptanceRunner = runGeneratedAcceptance }) {
+  const { directory, workspace } = runPaths(root, summary.id);
+  const { escalate } = controller(root, summary, quiet);
+  const ask = request => runAgent({ provider: summary.provider, iteration: 0, prompt: request.prompt, schema: request.schema, directory, workspace, timeoutMs: providerTimeoutMs(inputs.config) });
+  const agent = acceptanceAgent ?? ask, violator = violationAgent ?? ask;
+  // Evidence keeps digests and results only; the violation patches themselves are never written anywhere.
+  const attempts = [];
+  // scenarios repeats the last attempt, the one the registration (or the escalation) is based on.
+  const record = status => json(join(directory, 'acceptance-detection.json'), redact({ status, scenarios: attempts.at(-1)?.scenarios ?? [], attempts }));
+  let feedback = [], registration = null;
+  // #277: a provider that fails or runs out of time stops the run with its reason; the run is never left PENDING.
+  try {
+  for (let attempt = 1; attempt <= inputs.config.maxConsecutiveFailures && !registration; attempt += 1) {
+    const generation = await generateAcceptance({ workspace, issue: source.issue, provider: summary.provider, runId: summary.id, agent, feedback });
+    await json(join(directory, 'acceptance-generation.json'), redact(generation));
+    if (generation.status === 'ESCALATED') return escalate(`Trusted Acceptanceの生成を止めました（仕様が曖昧）: ${generation.reason}`, 'SPEC_AMBIGUOUS');
+    if (generation.status !== 'REGISTERED') return escalate(`生成したTrusted Acceptanceが品質検査に通りません: ${generation.findings.map(f => `${f.path}: ${f.message}`).join('; ')}`, 'ACCEPTANCE_REJECTED');
+    const detected = await detectScenarios({ workspace, directory: join(directory, 'violations'), registration: generation.registration, sbiIssue: source.ref.number, config: inputs.config, runner: acceptanceRunner, violator });
+    attempts.push({ attempt, tests: generation.registration.tests, scenarios: detected.scenarios, ...(detected.environment ? { environment: detected.environment } : {}) });
+    // The environment (Docker, the RSpec report) says nothing about the tests, so it stops the run and is not counted as an attempt.
+    if (detected.environment) { await record('ENVIRONMENT_FAILED'); return escalate(`生成したTrusted Acceptanceを実行できません（環境）: ${detected.environment}`, 'ACCEPTANCE_RUN_FAILED'); }
+    if (detected.scenarios.every(s => s.outcome === 'detected')) registration = generation.registration;
+    // The next attempt is told which Scenario was not proven and why, not the violation it was checked with.
+    else feedback = detected.scenarios.filter(s => s.outcome !== 'detected').map(s => `${s.scenario}: ${s.outcome === 'missed' ? '違反を入れてもPASSしました' : '判定できませんでした'}（${s.reason}）`);
+  }
+  } catch (error) {
+    return escalate(`Agent/runtime error: ${redactText(error.message)}`, classifyEscalation(error.message));
+  }
+  if (!registration) {
+    await record('FAIL');
+    const last = attempts.at(-1).scenarios.filter(s => s.outcome !== 'detected');
+    const failed = last.some(s => s.outcome === 'missed');
+    return escalate(`検出（G）が${attempts.length}回続けて成立しません: ${last.map(s => `${s.scenario}: ${s.reason}`).join('; ')}`, failed ? 'DETECTION_FAILED' : 'DETECTION_UNDETERMINABLE');
+  }
+  await record('PASS');
+  summary.headSha = await commitWorkspace(workspace, `SBI ${inputs.sbi.id}: register generated Trusted Acceptance\n\nHarness-Run: ${summary.id}\nSBI-Issue: ${source.ref.url}`);
+  summary.acceptance = { mode: 'generated', specDigest: registration.specDigest, registrationSha: summary.headSha };
+  await saveRun(root, summary);
+  return null;
+}
+async function runProtected({ root, provider, sbiPath, issueUrl, quiet = false, agent = runAgent, reviewer = review, semanticReviewer, full = false, publish = false, issues = githubCli, acceptanceAgent, violationAgent, acceptanceRunner }) {
   root = await realpath(root);
-  const { config, rules, sbi, riskPolicy, securityPolicy, humanGates, securityDocuments, lanePolicy } = await check(root, sbiPath);
+  if (issueUrl && sbiPath) throw new Error('Give either an SBI Issue URL or --sbi, not both');
+  // The Issue is read and validated before any run directory or worktree exists.
+  const sbiIssue = issueUrl ? parseIssueUrl(issueUrl).number : null;
+  const source = issueUrl ? await loadSbiIssue({ issueUrl, config: (await check(root, undefined, undefined, { sbiIssue })).config, github: issues }) : null;
+  const { config, rules, sbi, riskPolicy, securityPolicy, humanGates, securityDocuments, lanePolicy } = await check(root, sbiPath, source?.sbi, { sbiIssue });
   assertSafeInput({config,rules,sbi,riskPolicy,securityPolicy,humanGates,securityDocuments,lanePolicy});
   provider ??= config.provider;
   if (!['fake', 'codex', 'claude'].includes(provider)) throw new Error(`Unknown provider: ${provider}`);
@@ -238,65 +413,151 @@ async function runProtected({ root, provider, sbiPath, quiet = false, agent = ru
   const { directory, workspace } = runPaths(root, id);
   await mkdir(directory, { recursive: true });
   const baselineSha = await prepareWorkspace(root, workspace, sbi);
-  const inputs = { config, rules, sbi, riskPolicy, securityPolicy, humanGates, securityDocuments, lanePolicy, toolFingerprint: await toolFingerprint(root), skill: await readFile(join(root, '.harness/skills/implement.md'), 'utf8') };
-  const summary = { id, runDir: `.harness/runs/${id}`, sbi: sbi.id, sbiPath: sbiPath || config.sbi, provider,
-    fullVerification:full, status: 'PENDING', executionStatus: 'PENDING', reason: null, consecutiveFailures: 0, iterations: [], events: [],
+  const sbiSnapshot = source ? snapshotFromIssue({ ref: source.ref, issue: source.issue, runId: id, sbi }) : undefined;
+  if (sbiSnapshot) await json(join(directory, 'sbi-snapshot.json'), sbiSnapshot);
+  const inputs = { config, rules, sbi, riskPolicy, securityPolicy, humanGates, securityDocuments, lanePolicy, sbiSnapshot, toolFingerprint: await toolFingerprint(root), skill: await readFile(join(root, '.harness/skills/implement.md'), 'utf8') };
+  const summary = { id, runDir: `.harness/runs/${id}`, sbi: sbi.id, sbiPath: source ? null : sbiPath || config.sbi, provider,
+    ...(source ? { sbiIssue: sbiSnapshot.source } : {}),
+    // harness:run opens the PR itself once execution is DONE, but only for a run from an approved SBI Issue (#220). --sbi PATH and the
+    // configured sample SBI have no ready binding or spec approval and stay local self-tests; the fake provider (harness:demo) never publishes.
+    publish: publish === true && provider !== 'fake' && Boolean(source), fullVerification:full, status: 'PENDING', executionStatus: 'PENDING', reason: null, consecutiveFailures: 0, iterations: [], events: [],
     baselineSha, headSha: baselineSha, workspaceDigest: await workspaceFingerprint(workspace), inputsDigest: digest(inputs), gate: { required: false, state: 'NOT_REQUIRED' },
     merge: { state: 'NOT_ASSESSED', autoMergeEligible: false }, startedAt: new Date().toISOString() };
   await json(join(directory, 'inputs.json'), inputs);
-  const { transition, escalate } = controller(root, summary, quiet);
+  const { transition } = controller(root, summary, quiet);
   await transition('PENDING', sbi.title);
-  if (sbi.ambiguous || sbi.requiresDesignDecision) return escalate(humanGate(sbi, rules), sbi.ambiguous ? 'SPEC_AMBIGUOUS' : 'DESIGN_DECISION_REQUIRED');
-  const excludedSources = await readJson(join(directory,'workspace-exclusions.json'));
-  const preflightFiles = await Promise.all(sbi.allowedFiles.map(async path => {
-    let added = ''; try { added = await readFile(join(workspace,path),'utf8'); } catch(e) { if(e.code!=='ENOENT') throw e; }
-    return {path,status:'M',binary:false,added,excludedSecret:excludedSources.some(f=>f.path===path)};
-  }));
-  summary.lane = classifyLane(preflightFiles,sbi,lanePolicy);
-  summary.designApproval = {required:summary.lane.requiresDesignApproval,state:summary.lane.requiresDesignApproval?'WAITING_FOR_DESIGN_APPROVAL':'NOT_REQUIRED',contextDigest:digest({inputsDigest:summary.inputsDigest,baselineSha,promotion:sbi.promotion || null})};
-  await json(join(directory,'lane-assessment.json'),summary.lane);
-  summary.securityAssessment = classifySecurity({files:preflightFiles,sbi},securityPolicy);
-  await json(join(directory,'security-assessment.json'),{...summary.securityAssessment,phase:'preflight',headSha:baselineSha});
-  await json(join(directory,'security-verification.json'),{status:'NOT_RUN',requiredVerifiers:summary.securityAssessment.requiredVerifiers,checks:[],violations:[]});
-  const gateReason = humanGate(sbi, rules) || (summary.securityAssessment.requiresPreImplementationGate ? 'Human Gate: Security rule requires approval before implementation' : null);
-  const preflight = assessRisk({ files: preflightFiles, metadata: metadata(sbi), humanGate: Boolean(gateReason), securityAssessment:summary.securityAssessment, lane:summary.lane }, riskPolicy);
-  summary.riskPreflight = preflight;
-  if (gateReason || preflight.level === 3) {
-    summary.gate = { required: true, state: 'WAITING_FOR_HUMAN_GATE', approvalState:'WAITING_FOR_HUMAN_APPROVAL', reason: gateReason || (summary.designApproval.required ? 'Human Gate: Design Approval for prototype promotion' : null) || `Human Gate: ${preflight.reasons.join(', ')}`,
-      headSha: baselineSha, contextDigest: digest({ inputsDigest: summary.inputsDigest, baselineSha, allowedFiles: sbi.allowedFiles, reasons: preflight.reasons, securityAssessment:summary.securityAssessment }) };
-    summary.reason = summary.gate.reason || 'Human Gate: Design Approval for prototype promotion';
-    await json(join(directory, 'risk-preflight.json'), preflight);
+  // Not serialized: a resumed run uses the default runner. Tests replace it so harness:test never starts Docker for the generated specs.
+  inputs.acceptanceRunner = acceptanceRunner;
+  if (source?.mode === 'generate') {
+    const halted = await prepareGeneratedAcceptance({ root, summary, inputs, source, quiet, acceptanceAgent, violationAgent, acceptanceRunner });
+    if (halted) return halted;
   }
-  await json(join(directory, 'design-approval.json'), summary.designApproval);
-  await json(join(directory, 'risk-assessment.json'), { ...preflight, phase: 'preflight', headSha: baselineSha });
-  await json(join(directory, 'approvals.json'), { headSha: baselineSha, approvals: [], source: 'authenticated local ledger' });
-  await json(join(directory, 'merge-decision.json'), summary.merge);
+  const stopped = await assessPreflight(root, summary, inputs, quiet);
+  if (stopped) return stopped;
   return withRunLock(root, id, () => executeLoop({ root, summary, inputs, quiet, agent, reviewer, semanticReviewer }));
 }
-async function resumeProtected({ root, runId, quiet = false, agent = runAgent, reviewer = review, semanticReviewer }) {
+// The SBI Issue as loadSbiIssue reads it now must still give the snapshot the run took: ready or the spec approval still covers it,
+// and the spec is unchanged. Anything else throws with what differs, so the run goes back to a new SBI approval.
+async function assertSbiSourceUnchanged({ root, ref, runId, snapshot, issues, message }) {
+  const source = await loadSbiIssue({ issueUrl: ref.url, config: (await check(root, undefined, undefined, { sbiIssue: ref.number })).config, github: issues });
+  const checked = await check(root, undefined, source.sbi, { sbiIssue: ref.number });
+  if (isDeepStrictEqual(snapshotFromIssue({ ref: source.ref, issue: source.issue, runId, sbi: checked.sbi }), snapshot)) return { source, checked };
+  throw new Error([message, ...snapshotMismatch({ snapshot, source, config: checked.config }).map(r => `- ${r}`)].join('\n'));
+}
+async function resumeProtected({ root, runId, quiet = false, agent = runAgent, reviewer = review, semanticReviewer, github = githubPrCli, issues = githubCli }) {
   root = await realpath(root);
   return withRunLock(root, runId, async () => {
+    const stored = await readRunState(root, runId);
+    // An escalated merge assessment is final even if its cause disappears; only a new run re-verifies.
+    if (stored.executionStatus === 'DONE' && stored.status === 'ESCALATED') return stored;
     let summary;
     try {
       const loaded = await loadRun(root, runId);
       summary = loaded.summary;
-      if (summary.executionStatus === 'DONE') return await assessMerge(root, summary, loaded.inputs, quiet);
-      if (summary.executionStatus !== 'PENDING' || summary.iterations.length) throw new Error('Only an unstarted implementation gate or completed execution can resume; start a new run');
+      if (summary.kind === 'reverify') return await resumeReverify({ root, summary, inputs: loaded.inputs, quiet, reviewer, semanticReviewer, github });
+      if (summary.executionStatus === 'DONE') return await settleMerge(root, summary, loaded.inputs, quiet, github);
+      if (summary.gate.required && summary.gate.state !== 'APPROVED') throw new Error('This run waits for an implementation gate, which no longer exists (#175); approve the SBI and start a new run');
+      if (summary.executionStatus !== 'PENDING' || summary.iterations.length) throw new Error('Only an unstarted run or a completed execution can resume; start a new run');
+      // #220: an Issue run reads its Issue again before it implements, so a removed ready, a withdrawn spec approval or an edited spec stops it.
+      if (summary.sbiIssue) await assertSbiSourceUnchanged({ root, ref: summary.sbiIssue, runId, snapshot: loaded.inputs.sbiSnapshot, issues,
+        message: `${summary.sbiIssue.url} はrunの開始時から変わったため、実装を再開しません。SBIを再承認し、新しいrunで実装してください` });
       return await executeLoop({ root, summary, inputs: loaded.inputs, quiet, agent, reviewer, semanticReviewer });
     } catch (error) {
-      summary ??= await readJson(runPaths(root, runId).summary);
+      summary ??= stored;
+      if (summary.executionStatus === 'DONE') return mergeFailed(root, summary, quiet, error);
       return controller(root, summary, quiet).escalate(error.message);
     }
   });
 }
 
+// Publishes exactly the tested commit as harness/<run-id> and binds the run to that pull request. Never force-pushes, never merges.
+async function publishProtected({ root, runId, quiet = false, github = githubPrCli }) {
+  await withRunLock(root, runId, async () => {
+    const { summary, inputs } = await loadRun(root, runId);
+    if (summary.kind === 'reverify') throw new Error(`run ${runId} re-verifies ${summary.pullRequest.url}; it updates that PR through pnpm harness:reverify and never opens another`);
+    if (summary.executionStatus !== 'DONE' || summary.status === 'ESCALATED') throw new Error(`Execution must be DONE and not ESCALATED before opening a pull request (now ${summary.executionStatus}/${summary.status})`);
+    // #220: --sbi PATH has no ready binding or spec approval. Only a run from an approved SBI Issue, which commits its snapshot, opens a PR.
+    if (!summary.sbiIssue || !inputs.sbiSnapshot) throw new Error(`run ${runId} did not start from an SBI Issue (--sbi PATH is a local self-test); only a run of an approved SBI Issue opens a pull request`);
+    const { workspace } = runPaths(root, runId);
+    await workspaceIntegrity(workspace, summary.headSha);
+    const { remote, base } = inputs.config.github;
+    const repository = await github.repository(root, remote);
+    if (summary.pullRequest && summary.pullRequest.repository !== repository.name) throw new Error(`run is bound to ${summary.pullRequest.repository}, not ${repository.name}`);
+    await github.assertMergesIntoBase(root, { remote, base, baselineSha: summary.baselineSha, headSha: summary.headSha });
+    const files = await changedFiles(workspace, summary.baselineSha, summary.headSha);
+    if (files.some(f => isSecretPath(f.path) || hasSecret(f.added))) throw new Error('changed files contain sensitive material; refusing to push');
+    const body = pullRequestBody({ summary, sbi: inputs.sbi });
+    if (hasSecret(body)) throw new Error('pull request body contains sensitive material; refusing to publish');
+    const branch = `harness/${runId}`;
+    const open = await github.findOpenPull(repository, branch);
+    if (open && open.base.ref !== base) throw new Error(`${branch} のPR #${open.number} は${open.base.ref}向けです。${base}向けとして再利用しません`);
+    const remoteHead = await github.remoteBranchSha(root, remote, branch);
+    if (remoteHead && remoteHead !== summary.headSha) throw new Error(`${branch} は既に別のcommit ${remoteHead.slice(0, 12)} を指しています。force pushしません`);
+    if (!remoteHead) await github.push(root, remote, summary.headSha, branch);
+    const pull = open ?? await github.createPull(repository, { title: `[Harness] ${inputs.sbi.id}: ${inputs.sbi.title}`, head: branch, base, body, draft: false });
+    summary.pullRequest = { number: pull.number, url: pull.html_url, branch, base, repository: repository.name };
+    summary.events.push({ status: summary.status, phase: 'pull-request', detail: `${pull.html_url} (${summary.headSha})`, at: new Date().toISOString() });
+    await saveRun(root, summary);
+  });
+  return resumeProtected({ root, runId, quiet, github });
+}
+
+// Only a run started to publish, whose execution is DONE and which has no PR yet, is pushed. A FAIL or an escalation never opens a PR.
+async function continueToPullRequest(options, summary) {
+  if (summary.kind === 'reverify') return continueReverify(options, summary);
+  if (!summary.publish || summary.executionStatus !== 'DONE' || summary.pullRequest) return summary;
+  try { return await publishProtected({ root: options.root, runId: summary.id, quiet: options.quiet, github: options.github }); }
+  catch (error) { error.message = `run ${summary.id}: PR not opened: ${error.message}（復旧: pnpm harness:pr --run ${summary.id}）`; throw error; }
+}
 export async function runHarness(options) {
   const root = await realpath(options.root);
-  return withEvidenceProtection(root, () => runProtected({...options,root}), { extensions: options.redactionExtensions || [] });
+  return withEvidenceProtection(root, async () => continueToPullRequest({...options,root}, await runProtected({...options,root})), { extensions: options.redactionExtensions || [] });
+}
+// Exit code of harness:run / approve / resume / pr / demo. 0: the run stopped where a human or GitHub CI takes over
+// (PR opened and waiting for CI or Review, MERGE_ALLOWED, or a DONE run that never publishes). 2: the run failed or needs recovery.
+// A run that could not open its PR throws, and the CLI exits 1.
+export function runExitCode(run) {
+  if (run.status === 'MERGE_ALLOWED') return 0;
+  if (run.executionStatus !== 'DONE' || (run.publish && !run.pullRequest)) return 2;
+  const waitingForCi = Boolean(run.pullRequest) && run.status === 'BLOCKED' && run.merge?.reasons?.length > 0 && run.merge.reasons.every(r => r === 'required_ci_not_passed');
+  return run.status === 'WAITING_FOR_HUMAN_REVIEW' || waitingForCi ? 0 : 2;
+}
+// An SBI Issue URL names the run that waits for this decision. More than one candidate is never guessed.
+// Candidates are the signed run states readRunState verifies (#75); .harness/state/runs is a projection and is never read here.
+// A summary that fails verification is never a candidate; it is named only when no verified run waits for the Issue.
+async function waitingRun(root, url, purpose) {
+  const waiting = [], unverified = [];
+  for (const name of await readdir(join(root, '.harness/runs'))) {
+    if (!runIdSchema.safeParse(name).success || !await exists(runPaths(root, name).summary)) continue;
+    let summary;
+    try { summary = await readRunState(root, name); }
+    catch (error) {
+      // Planner and API Schema directories have their own unsigned summary.json; only a run summary that names this Issue matters.
+      if (await readJson(runPaths(root, name).summary).then(s => s?.sbiIssue?.url === url, () => false)) unverified.push(`${name}（${error.message}）`);
+      continue;
+    }
+    if (waitsForIssue(summary, url, purpose)) waiting.push(name);
+  }
+  if (waiting.length !== 1) throw new Error(`${url} を待っているrunが${waiting.length}件あります${waiting.length ? `（${waiting.join(', ')}）。--run RUN_ID で指定してください` : ''}${!waiting.length && unverified.length ? `。run stateの検証に失敗したrun: ${unverified.join(', ')}` : ''}`);
+  return waiting[0];
+}
+// harness:approve records the decision through the trusted identity adapter, then continues the run as harness:resume and harness:pr would.
+export async function approveRun(options) {
+  const root = await realpath(options.root);
+  return withEvidenceProtection(root, async () => {
+    const issueUrl = options.runId ? null : parseIssueUrl(options.issueUrl).url;
+    const runId = options.runId ?? await waitingRun(root, issueUrl, options.purpose);
+    await recordDecision({ root, runId, purpose: options.purpose, decision: options.decision, identityProvider: options.identityProvider, issueUrl });
+    return continueToPullRequest({...options,root,runId}, await resumeProtected({...options,root,runId}));
+  }, { extensions: options.redactionExtensions || [] });
+}
+export async function openPullRequest(options) {
+  const root = await realpath(options.root);
+  return withEvidenceProtection(root, () => publishProtected({...options,root}), { extensions: options.redactionExtensions || [] });
 }
 export async function resumeRun(options) {
   const root = await realpath(options.root);
-  return withEvidenceProtection(root, () => resumeProtected({...options,root}), { extensions: options.redactionExtensions || [] });
+  return withEvidenceProtection(root, async () => continueToPullRequest({...options,root}, await resumeProtected({...options,root})), { extensions: options.redactionExtensions || [] });
 }
 
 // Explicit cleanup keeps evidence and the reachable run ref. Dirty worktrees are never forced away.
@@ -304,8 +565,8 @@ export async function cleanupRun({root,runId}) {
   root = await realpath(root);
   return withRunLock(root,runId,async()=>{
     const paths = runPaths(root,runId);
-    const summary = await readJson(paths.summary);
-    if (summary.id !== runId || summary.cleanedAt) throw new Error('Invalid or already cleaned run');
+    const summary = await readRunState(root, runId);
+    if (summary.cleanedAt) throw new Error('Invalid or already cleaned run');
     await assertWorktreeOwner(root,paths.workspace,summary.baselineSha);
     await workspaceIntegrity(paths.workspace,summary.headSha);
     if (await workspaceFingerprint(paths.workspace) !== summary.workspaceDigest) throw new Error('workspace snapshot changed');
@@ -318,4 +579,244 @@ export async function cleanupRun({root,runId}) {
     await saveRun(root,summary);
     return summary;
   });
+}
+
+// harness:reverify PR_URL (Issue #144, ADR-0003). After main moved, the finished code of a PR is merged with the new main in a new run and
+// verified once without the implementation agent. Only a candidate that passes is pushed to the same branch as a fast-forward, and the PR
+// body is rewritten for the new run. The implementation run, its evidence and its approvals are left untouched and never count for it.
+const reverifyPhases = ['PREPARED', 'VERIFIED', 'PUSHING', 'PUSHED', 'PR_UPDATED'];
+const reverifyReached = (summary, phase) => reverifyPhases.indexOf(summary.reverify.publish) >= reverifyPhases.indexOf(phase);
+async function reverifyLinkCheck(workspace, summary) {
+  const link = await verifyReverifyLink({ root: workspace, base: summary.baselineSha, head: summary.headSha });
+  const expected = { runId: summary.id, parentRunId: summary.reverify.parentRunId, baselineSha: summary.baselineSha, previousTestedSha: summary.reverify.previousTestedSha };
+  const matches = link.status === 'PASS' && Object.entries(expected).every(([key, value]) => link[key] === value);
+  return { id: 'reverify-link', required: true, status: matches ? 'PASS' : 'FAIL', reasons: matches ? [] : [...link.reasons, 'the head commit does not link this re-verification run'] };
+}
+async function resumeReverify({ root, summary, inputs, quiet, reviewer, semanticReviewer, github }) {
+  if (summary.executionStatus === 'PENDING' && !summary.iterations.length) return reverifyExecute({ root, summary, inputs, quiet, reviewer, semanticReviewer });
+  // Until the candidate is on the PR branch, GitHub shows the previous head; the merge is assessed only after the push.
+  if (summary.executionStatus === 'DONE') return reverifyReached(summary, 'PUSHED') ? settleMerge(root, summary, inputs, quiet, github) : summary;
+  throw new Error(`A failed re-verification does not resume; run pnpm harness:reverify ${summary.pullRequest.url} to start a new run`);
+}
+async function reverifyExecute({ root, summary, inputs, quiet, reviewer = review, semanticReviewer }) {
+  const { directory, workspace } = runPaths(root, summary.id);
+  const { transition, escalate } = controller(root, summary, quiet);
+  const iteration = 1, iterDir = join(directory, `iteration-${iteration}`);
+  await mkdir(iterDir);
+  const result = { iteration, agent: { status: 'SKIPPED', reason: 'harness:reverify never calls the implementation agent' }, verification: null, security: null, securityVerification: null, gateApproved: false, review: null,
+    semanticReview: { enabled: true, status: 'NOT_RUN' }, completion: false, headSha: summary.headSha };
+  summary.iterations.push(result);
+  const record = async () => { await json(join(iterDir, 'result.json'), result); await saveRun(root, summary); };
+  try {
+    await workspaceIntegrity(workspace, summary.headSha);
+    const escalated = await verifyHead({ root, summary, inputs, result, iterDir, iteration, record, quiet, reviewer, semanticReviewer });
+    if (escalated) return escalated;
+  } catch (error) {
+    result.error = redactText(error.message);
+    await record(); return escalate(`Runtime error: ${error.message}`, classifyEscalation(error.message));
+  }
+  if (!result.completion) {
+    // No implementation iteration follows a failed re-verification, and the PR keeps its previous head.
+    summary.consecutiveFailures = 1;
+    await transition('FAILED', '再検証の必須検証が失敗しました。実装には戻らず、PRも更新しません');
+    return summary;
+  }
+  summary.executionFinishedAt = new Date().toISOString();
+  summary.reverify.publish = 'VERIFIED';
+  await transition('DONE', 'Re-verification: Verifier → Policy Reviewer → Completion Judge passed');
+  return summary;
+}
+// The candidate is pushed only while main is still its baseline and the PR branch still points at the head it was built from.
+// Git rejects a push that is not a fast-forward, so even a push racing this check never overwrites a commit nobody verified.
+async function pushReverify({ root, runId, github }) {
+  await withRunLock(root, runId, async () => {
+    const { summary, inputs } = await loadRun(root, runId);
+    if (summary.executionStatus !== 'DONE' || summary.status === 'ESCALATED' || reverifyReached(summary, 'PUSHED')) throw new Error(`run ${runId} is not a verified re-verification waiting to be pushed`);
+    const { workspace } = runPaths(root, runId);
+    const { remote, base } = inputs.config.github;
+    const { branch } = summary.pullRequest;
+    if ((await reverifyLinkCheck(workspace, summary)).status !== 'PASS') throw new Error('the candidate commit does not link this re-verification run; refusing to push');
+    await github.assertBaseIsBaseline(root, { remote, base, baselineSha: summary.baselineSha });
+    const files = await changedFiles(workspace, summary.baselineSha, summary.headSha);
+    if (files.some(f => isSecretPath(f.path) || hasSecret(f.added))) throw new Error('changed files contain sensitive material; refusing to push');
+    const remoteHead = await github.remoteBranchSha(root, remote, branch);
+    if (remoteHead !== summary.headSha) {
+      if (remoteHead !== summary.reverify.previousTestedSha) throw new Error(`${branch} は再検証の開始後に ${remoteHead?.slice(0, 12) ?? 'なし'} へ更新されました。検証していないcommitを上書きしないため、pushしません。pnpm harness:reverify ${summary.pullRequest.url} で最新のPR HEADを再検証してください`);
+      summary.reverify.publish = 'PUSHING';
+      summary.events.push({ status: summary.status, phase: 'pull-request', detail: `pushing ${summary.headSha} to ${branch}`, at: new Date().toISOString() });
+      await saveRun(root, summary);
+      await github.push(root, remote, summary.headSha, branch);
+    }
+    summary.reverify.publish = 'PUSHED';
+    summary.events.push({ status: summary.status, phase: 'pull-request', detail: `${branch} = ${summary.headSha}`, at: new Date().toISOString() });
+    await saveRun(root, summary);
+  });
+}
+async function updateReverifyPull({ root, runId, github }) {
+  return withRunLock(root, runId, async () => {
+    const { summary, inputs } = await loadRun(root, runId);
+    const [owner, repo] = summary.pullRequest.repository.split('/');
+    const body = pullRequestBody({ summary, sbi: inputs.sbi });
+    if (hasSecret(body)) throw new Error('pull request body contains sensitive material; refusing to publish');
+    await github.updatePull({ owner, repo }, summary.pullRequest.number, { body });
+    summary.reverify.publish = 'PR_UPDATED';
+    summary.events.push({ status: summary.status, phase: 'pull-request', detail: `${summary.pullRequest.url} (${summary.headSha})`, at: new Date().toISOString() });
+    await saveRun(root, summary);
+    return summary;
+  });
+}
+// Push, assess the merge on GitHub, then rewrite the PR body with the assessed Risk. Each step resumes from the recorded phase.
+async function continueReverify(options, summary) {
+  if (summary.executionStatus !== 'DONE' || summary.status === 'ESCALATED' || summary.reverify.publish === 'PR_UPDATED') return summary;
+  const { root, quiet, github = githubPrCli } = options;
+  try {
+    if (!reverifyReached(summary, 'PUSHED')) await pushReverify({ root, runId: summary.id, github });
+    const assessed = await resumeProtected({ root, runId: summary.id, quiet, github });
+    return assessed.reverify.publish === 'PUSHED' ? await updateReverifyPull({ root, runId: summary.id, github }) : assessed;
+  } catch (error) { error.message = `run ${summary.id}: PR not updated: ${error.message}（復旧: pnpm harness:reverify ${summary.pullRequest.url}）`; throw error; }
+}
+// The one re-verification of this PR head on this baseline, if it was started before. Repeating the command continues it.
+async function existingReverify(root, { pullRequest, parentRunId, baselineSha, pullHead }) {
+  const found = [];
+  for (const name of await readdir(join(root, '.harness/runs'))) {
+    if (!runIdSchema.safeParse(name).success || !await exists(runPaths(root, name).summary)) continue;
+    let summary;
+    try { summary = await readRunState(root, name); } catch { continue; }
+    // A failed or escalated run is evidence only; running the command again starts a new run for the same head.
+    if (['FAILED', 'ESCALATED'].includes(summary.executionStatus) || summary.status === 'ESCALATED') continue;
+    // A run that stopped before its preflight has no lane and cannot continue; a run of another PR on this branch is not this one.
+    if (summary.executionStatus === 'PENDING' && !summary.lane) continue;
+    if (summary.pullRequest?.number !== pullRequest.number || summary.pullRequest?.repository !== pullRequest.repository) continue;
+    if (summary.kind === 'reverify' && !summary.cleanedAt && summary.reverify.parentRunId === parentRunId && summary.baselineSha === baselineSha
+      && (summary.reverify.previousTestedSha === pullHead || (summary.headSha === pullHead && reverifyReached(summary, 'PUSHING')))) found.push(name);
+  }
+  if (found.length > 1) throw new Error(`同じPR HEADとbaselineの再検証runが${found.length}件あります（${found.join(', ')}）`);
+  return found[0] ?? null;
+}
+// The PASS run the PR head is already bound to on this base SHA, if any. The signed run state, the run ref and the commit are the only
+// sources; GitHub Reviews are not read. Only a run whose tested SHA is the PR head itself and whose baseline is the current base tip
+// qualifies, and the merge of the base into the head must be exactly the tested tree. Anything else is verified again in a new run.
+async function verifiedRun(root, { pullRequest, parentRunId, baselineSha, pullHead }) {
+  const merged = await mergeTree(root, baselineSha, pullHead, ['--no-messages']);
+  const head = await git(root, ['rev-parse', `${pullHead}^{tree}`]);
+  if (!merged.ok || merged.stdout.trim() !== head.stdout.trim()) return null;
+  const found = [];
+  for (const name of await readdir(join(root, '.harness/runs'))) {
+    if (!runIdSchema.safeParse(name).success || !await exists(runPaths(root, name).summary)) continue;
+    let summary;
+    try { summary = await readRunState(root, name); } catch { continue; }
+    const pr = summary.pullRequest;
+    if (summary.headSha !== pullHead || summary.baselineSha !== baselineSha || summary.executionStatus !== 'DONE' || summary.status === 'ESCALATED' || summary.cleanedAt) continue;
+    if (!pr || ['number', 'branch', 'base', 'repository'].some(key => pr[key] !== pullRequest[key])) continue;
+    if (summary.kind === 'reverify' ? summary.reverify.parentRunId !== parentRunId || summary.reverify.publish !== 'PR_UPDATED' : summary.id !== parentRunId) continue;
+    if ((await git(root, ['rev-parse', '--verify', '--quiet', `refs/harness/runs/${name}`], true)).stdout.trim() !== pullHead) continue;
+    if (summary.kind === 'reverify' && (await reverifyLinkCheck(root, summary)).status !== 'PASS') continue;
+    found.push(summary);
+  }
+  return found.length === 1 ? found[0] : null;
+}
+async function parentEvidence(root, parentRunId, previousTestedSha) {
+  if (!await exists(runPaths(root, parentRunId).summary)) return { found: false };
+  try {
+    const parent = await readRunState(root, parentRunId);
+    return { found: true, verified: true, testedSha: parent.headSha, testedShaMatches: parent.headSha === previousTestedSha };
+  } catch { return { found: true, verified: false }; }
+}
+// Every precondition is checked before a run directory or worktree exists. A changed SBI goes back to a new implementation run.
+async function reverifyProtected({ root, pullUrl, quiet = false, reviewer = review, semanticReviewer, github = githubPrCli, issues = githubCli }) {
+  root = await realpath(root);
+  const ref = parsePullUrl(pullUrl);
+  const { remote, base } = (await check(root)).config.github;
+  const repository = await github.repository(root, remote);
+  if (repository.name !== `${ref.owner}/${ref.repo}`) throw new Error(`${ref.url} は${remote}（${repository.name}）のPRではありません`);
+  const baselineSha = await sourceIntegrity(root);
+  const tip = await github.remoteBranchSha(root, remote, base);
+  if (tip !== baselineSha) throw new Error(`${remote}/${base} (${tip?.slice(0, 12) ?? 'なし'}) と元checkoutのHEAD ${baselineSha.slice(0, 12)} が一致しません。最新の${base}をpullしてから再実行してください`);
+  const pull = await github.pull(repository, ref.number);
+  const parentRunId = /^harness\/(.+)$/.exec(pull.head.ref)?.[1];
+  if (pull.state !== 'open' || pull.merged === true || pull.merged_at) throw new Error(`PR #${ref.number} はopenではありません`);
+  if (pull.base.ref !== base) throw new Error(`PR #${ref.number} は${pull.base.ref}向けです。${base}向けのPRだけを再検証します`);
+  if (!parentRunId || !runIdSchema.safeParse(parentRunId).success) throw new Error(`PR #${ref.number} のbranch ${pull.head.ref} はHarnessのrun branch（harness/<run-id>）ではありません`);
+  if (!pull.head.repo) throw new Error(`PR #${ref.number} のheadは削除されたforkです。再検証しません`);
+  if (pull.head.repo.full_name !== repository.name) throw new Error(`PR #${ref.number} のheadは${pull.head.repo.full_name}にあり、${repository.name}ではありません。forkのPRは再検証しません`);
+  const branch = pull.head.ref;
+  const pullHead = await github.remoteBranchSha(root, remote, branch);
+  if (pullHead !== pull.head.sha) throw new Error(`${branch} (${pullHead?.slice(0, 12) ?? 'なし'}) がPR #${ref.number} のHEAD ${pull.head.sha.slice(0, 12)} と一致しません。同じリポジトリのbranchだけを再検証します`);
+  await git(root, ['fetch', '--quiet', '--no-tags', remote, `refs/heads/${branch}`]);
+  if ((await git(root, ['rev-parse', 'FETCH_HEAD'])).stdout.trim() !== pullHead) throw new Error(`${branch} が読み取り中に更新されました。もう一度実行してください`);
+  const { path, snapshot } = await committedSnapshot(root, baselineSha, pullHead);
+  if (snapshot.runId !== parentRunId) throw new Error(`${path} のrun ${snapshot.runId} がPRのbranch ${branch} と一致しません`);
+  if (snapshot.source.repo !== repository.name) throw new Error(`${path} は${repository.name}のSBI Issueではありません`);
+  const { checked } = await assertSbiSourceUnchanged({ root, ref: snapshot.source, runId: parentRunId, snapshot, issues,
+    message: `${path} のSBI snapshotが、現在のSBI Issueと${base}のTrusted Acceptance登録から組み立てたSBIと一致しません。SBIが変わったため再検証せず、新しいrunで実装してください` });
+  await assertSafeCommit(root, baselineSha, pullHead);
+  const verified = await verifiedRun(root, { pullRequest: { number: ref.number, branch, base, repository: repository.name }, parentRunId, baselineSha, pullHead });
+  if (verified) return { ...verified, alreadyVerified: true };
+  const existing = await existingReverify(root, { pullRequest: { number: ref.number, repository: repository.name }, parentRunId, baselineSha, pullHead });
+  if (existing) {
+    // An unstarted run is continued and an updated PR is re-assessed; a verified candidate continues to publish; a stopped run stays stopped.
+    const stored = await readRunState(root, existing);
+    return stored.executionStatus === 'PENDING' || stored.reverify.publish === 'PR_UPDATED' ? resumeProtected({ root, runId: existing, quiet, reviewer, semanticReviewer, github }) : stored;
+  }
+
+  const { config, rules, sbi, riskPolicy, securityPolicy, humanGates, securityDocuments, lanePolicy } = checked;
+  assertSafeInput({ config, rules, sbi, riskPolicy, securityPolicy, humanGates, securityDocuments, lanePolicy });
+  const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
+  const { directory, workspace } = runPaths(root, id);
+  await mkdir(directory, { recursive: true });
+  await prepareWorkspace(root, workspace);
+  await json(join(directory, 'sbi-snapshot.json'), snapshot);
+  const inputs = { config, rules, sbi, riskPolicy, securityPolicy, humanGates, securityDocuments, lanePolicy, sbiSnapshot: snapshot, toolFingerprint: await toolFingerprint(root), skill: await readFile(join(root, '.harness/skills/implement.md'), 'utf8') };
+  const summary = { id, runDir: `.harness/runs/${id}`, kind: 'reverify', sbi: sbi.id, sbiPath: null, sbiIssue: snapshot.source, provider: config.provider,
+    publish: true, fullVerification: false, status: 'PENDING', executionStatus: 'PENDING', reason: null, consecutiveFailures: 0, iterations: [], events: [],
+    baselineSha, headSha: baselineSha, workspaceDigest: await workspaceFingerprint(workspace), inputsDigest: digest(inputs), gate: { required: false, state: 'NOT_REQUIRED' },
+    merge: { state: 'NOT_ASSESSED', autoMergeEligible: false },
+    pullRequest: { number: ref.number, url: pull.html_url, branch, base, repository: repository.name },
+    reverify: { parentRunId, previousTestedSha: pullHead, sbiSnapshotDigest: digest(snapshot), publish: 'PREPARED', gitVersion: await gitVersion(root), parentRun: await parentEvidence(root, parentRunId, pullHead) },
+    startedAt: new Date().toISOString() };
+  await json(join(directory, 'inputs.json'), inputs);
+  const { transition, escalate } = controller(root, summary, quiet);
+  await transition('PENDING', `re-verify ${branch} ${pullHead.slice(0, 12)} on ${base} ${baselineSha.slice(0, 12)}`);
+  return withRunLock(root, id, async () => {
+    // The candidate is built from Git objects, so the message is exactly ours (no merge.log shortlog after the trailers) and the tree is
+    // the one verifyReverifyLink recomputes. A head that already contains the baseline (a person resolved a conflict there) keeps its
+    // tree; only the link commit is added.
+    const message = `Re-verify SBI ${sbi.id} on ${base} ${baselineSha.slice(0, 12)}\n\n${reverifyTrailers({ runId: id, parentRunId })}`;
+    try {
+      let candidate;
+      if ((await git(workspace, ['merge-base', '--is-ancestor', baselineSha, pullHead], true)).ok) {
+        candidate = (await git(workspace, ['commit-tree', `${pullHead}^{tree}`, '-p', pullHead, '-m', message])).stdout.trim();
+      } else {
+        const merged = await mergeTree(workspace, baselineSha, pullHead, ['--name-only', '--no-messages', '-z']);
+        const [tree, ...conflicts] = merged.stdout.split('\0').filter(Boolean);
+        if (merged.code === 1) {
+          summary.reverify.conflicts = [...new Set(conflicts)].sort();
+          return escalate(`${base} ${baselineSha.slice(0, 12)} と ${pullHead.slice(0, 12)} の統合で競合しました: ${summary.reverify.conflicts.join(', ')}。${branch} で競合を解消してpushし、pnpm harness:reverify ${pull.html_url} を再実行してください`, 'REVERIFY_CONFLICT');
+        }
+        if (!merged.ok) throw new Error(`git merge-tree: ${merged.stderr || merged.error}`);
+        candidate = (await git(workspace, ['commit-tree', tree, '-p', baselineSha, '-p', pullHead, '-m', message])).stdout.trim();
+      }
+      // The run records the candidate as soon as the worktree points at it, so cleanup and a failure below see the same HEAD.
+      await git(workspace, ['checkout', '--quiet', '--detach', candidate]);
+      await git(workspace, ['update-ref', `refs/harness/runs/${id}`, candidate]);
+      summary.headSha = candidate;
+      summary.workspaceDigest = await workspaceFingerprint(workspace);
+      await saveRun(root, summary);
+      const link = await reverifyLinkCheck(workspace, summary);
+      if (link.status !== 'PASS') return escalate(`the candidate commit does not link this re-verification run: ${link.reasons.join('; ')}`);
+      // A person may have changed any file while resolving a conflict, so every changed file is held to the SBI scope again.
+      for (const file of await changedFiles(workspace, baselineSha, summary.headSha)) {
+        if (file.path === snapshotPath(snapshot)) continue;
+        try { assertWritablePath(file.path); } catch (error) { return escalate(error.message); }
+        if (!inScope(sbi, file.path) && !isGeneratedRegistrationPath(file.path, sbi)) return escalate(`scope/path violation: ${file.path}`);
+      }
+      const stopped = await assessPreflight(root, summary, inputs, quiet);
+      if (stopped) return stopped;
+    } catch (error) { return escalate(`Runtime error: ${error.message}`, classifyEscalation(error.message)); }
+    return reverifyExecute({ root, summary, inputs, quiet, reviewer, semanticReviewer });
+  });
+}
+export async function reverifyPullRequest(options) {
+  const root = await realpath(options.root);
+  return withEvidenceProtection(root, async () => continueToPullRequest({ ...options, root }, await reverifyProtected({ ...options, root })), { extensions: options.redactionExtensions || [] });
 }

@@ -1,12 +1,44 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { execute } from './io.mjs';
-import { hasSecret, isSecretPath } from './evidence-protection.mjs';
+import { runIsolated } from './isolation.mjs';
+import { hasSecret, hasTrackedCredential, isSecretPath } from './evidence-protection.mjs';
 import { classifyLane } from './lanes.mjs';
 import { securityPolicySchema } from './schemas.mjs';
+import { declaredPublic, newPublicOperations } from './openapi-public-operation.mjs';
+import { snapshotFilePattern } from './sbi-source.mjs';
 const normalize = text => text.replace(/[^a-z0-9]/gi, '').toLowerCase();
-export function classifySecurity({ files = [], sbi = {} }, rawPolicy) {
+// Markdown that only cites a policy file or rule ID (e.g. docs/security/authorization.md, SEC-ROLE-001) is not a security change.
+const citationFree = (path, text) => /\.(md|mdx|markdown)$/i.test(path)
+  ? text.replace(/\]\([^)]*\)/g, ']').replace(/(?:[\w.-]+\/)+[\w-]+\.[a-z0-9]+\b|\b[\w-]+\.(?:md|mdx|markdown)\b/gi, '').replace(/\bSEC-[A-Z]+-\d+\b/g, '')
+  : text;
+// The classifier and its fixture must spell out what contentPatterns detect; path rules and verifiers still apply to them.
+const classifierSources = new Set(['tools/harness/security-enforcement.mjs', 'tools/harness/security-impact-classifier.test.mjs']);
+const classifierSource = f => [f.path, f.previousPath].filter(Boolean).every(path => classifierSources.has(path));
+// A rule's contentExceptions drop only the named strings, and only when the file stays under the exception's paths before and after.
+// Line anchors work as in contentPatterns; case is ignored only where the exception says so.
+const contentFor = (rule, f, text) => (rule.contentExceptions || [])
+  .filter(e => [f.path, f.previousPath].filter(Boolean).every(path => e.pathPatterns.some(p => new RegExp(p).test(path))))
+  .reduce((rest, e) => e.ignoredPatterns.reduce((t, p) => t.replace(new RegExp(p, e.ignoreCase ? 'gim' : 'gm'), ''), rest), text);
+// A new operation made public without touching existing or shared requirements drops only the named patterns (#243). Each SBI must declare
+// every such operation public; the pass without an SBI judges the structure only, and the CI requires an SBI for a contract change (ADR-0006).
+const sbiStatements = sbi => [sbi.title, sbi.description, ...(sbi.risks ?? []), ...(sbi.acceptanceCriteria ?? [])].some(Boolean);
+const publicOperationFor = (rule, f, sbi, text) => {
+  if (!rule.publicOperationException) return text;
+  const added = newPublicOperations(f);
+  if (!added || (sbiStatements(sbi) && !added.every(op => declaredPublic(op, sbi, rule.ignoredMetadataPatterns ?? [])))) return text;
+  return rule.publicOperationException.ignoredPatterns.reduce((t, p) => t.replace(new RegExp(p, 'gm'), ''), text);
+};
+// A matched file requires only the verifiers whose appliesTo covers that file. A rule the SBI declares or describes keeps its gate, level
+// and approvals, but requires only the verifiers whose appliesTo covers a changed path (#165); with no path known yet, it requires them all.
+// A rule with metadataRequiresAllVerifiers (SEC-DESTRUCTIVE-001) stays fail-closed on a match in the SBI text alone.
+const sbiSources = new Set(['requiredSecurityRules', 'securityImpact', 'SBI/acceptance']);
+export function classifySecurity({ files = [], sbi = {}, legacySbi = false }, rawPolicy) {
   const policy = securityPolicySchema.parse(rawPolicy);
+  const appliesTo = new Map(policy.verifiers.map(v => [v.id, v.appliesTo]));
+  const changedPaths = files.flatMap(f => [f.path, f.previousPath]).filter(Boolean);
+  const covers = (id, paths) => paths.some(path => path && appliesTo.get(id).some(p => new RegExp(p).test(path)));
+  const applies = (rule, id, matches) => !appliesTo.get(id) || matches.some(m => (m.source === 'SBI/acceptance' && rule.metadataRequiresAllVerifiers)
+    || (sbiSources.has(m.source) ? !changedPaths.length || covers(id, changedPaths) : covers(id, [m.path, m.previousPath])));
   const impacts = new Set(), matchedRules = [], reasons = [];
   const required = new Set([...policy.alwaysRequiredVerifiers, ...(sbi.requiredVerifiers || [])]);
   let gate = Boolean(sbi.preImplementationGate), minimum = Math.max(2, sbi.minimumRiskLevel || 2), approvals = 0;
@@ -18,16 +50,26 @@ export function classifySecurity({ files = [], sbi = {} }, rawPolicy) {
     const matches = [];
     if ((sbi.requiredSecurityRules || []).includes(rule.id)) matches.push({ source: 'requiredSecurityRules' });
     if (declared.some(d => rule.categories.some(c => normalize(c) === normalize(d)))) matches.push({ source: 'securityImpact' });
-    if (rule.metadataPatterns.some(p => new RegExp(p,'i').test(metadata))) matches.push({ source: 'SBI/acceptance' });
+    const ruleMetadata = (rule.ignoredMetadataPatterns || []).reduce((text, p) => text.replace(new RegExp(p, 'gi'), ''), metadata);
+    if (!(legacySbi && rule.ignoreLegacySbiMetadata) && rule.metadataPatterns.some(p => new RegExp(p,'i').test(ruleMetadata))) matches.push({ source: 'SBI/acceptance' });
     for (const f of files) {
-      if ([f.path, f.previousPath].filter(Boolean).some(path => rule.pathPatterns.some(p => new RegExp(p,'i').test(path)))) matches.push({ source: 'path', path: f.path });
-      if (rule.contentPatterns.some(p => new RegExp(p,'im').test(`${f.added || ''}\n${f.deleted || ''}`))) matches.push({ source: 'changed-content', path: f.path });
+      const at = f.previousPath ? { path: f.path, previousPath: f.previousPath } : { path: f.path };
+      if ([f.path, f.previousPath].filter(Boolean).some(path => rule.pathPatterns.some(p => new RegExp(p,'i').test(path)))) matches.push({ source: 'path', ...at });
+      const inAddedScope = rule.addedContent && [f.path, f.previousPath].filter(Boolean).some(path => rule.addedContent.pathPatterns.some(p => new RegExp(p,'i').test(path)));
+      if (inAddedScope && !classifierSource(f)) {
+        const added = rule.addedContent.ignoredPatterns.reduce((text, p) => text.replace(new RegExp(p, 'gim'), ''), f.added || '');
+        if (f.binary || rule.addedContent.patterns.some(p => new RegExp(p,'im').test(added)) || rule.addedContent.removedPatterns.some(p => new RegExp(p,'im').test(f.deleted || ''))) matches.push({ source: 'added-content', ...at });
+      }
+      if (!classifierSource(f) && rule.contentPatterns.some(p => new RegExp(p,'im').test(publicOperationFor(rule, f, sbi, contentFor(rule, f, citationFree(f.path, `${f.added || ''}\n${f.deleted || ''}`)))))) matches.push({ source: 'changed-content', ...at });
     }
     if (rule.categories.includes('SecurityConfig') && files.some(f => policy.forbiddenPatterns.some(p => new RegExp(p,'im').test(`${f.added || ''}\n${f.deleted || ''}`)))) matches.push({ source: 'forbidden-security-pattern' });
     if (rule.categories.includes('Secret') && files.some(f => f.excludedSecret === true || isSecretPath(f.path) || hasSecret(`${f.added || ''}\n${f.deleted || ''}`))) matches.push({ source: 'secret-file-or-content' });
     if (matches.length) {
       rule.categories.forEach(c => impacts.add(c)); matchedRules.push(rule.id);
-      rule.requiredVerifiers.forEach(id => required.add(id));
+      // #246 N2: a changed path the rule names (apps/ for SEC-AUTH-001) that none of its verifiers covers requires them all.
+      const scoped = rule.requiredVerifiers.filter(id => appliesTo.get(id));
+      const uncovered = changedPaths.some(path => (rule.uncoveredPathsRequireAllVerifiers || []).some(p => new RegExp(p).test(path)) && !scoped.some(id => covers(id, [path])));
+      rule.requiredVerifiers.filter(id => uncovered || applies(rule, id, matches)).forEach(id => required.add(id));
       gate ||= rule.preImplementationGate; minimum = Math.max(minimum, rule.minimumRiskLevel); approvals = Math.max(approvals, rule.requiredHumanApprovals);
       reasons.push({ ruleId: rule.id, policyDocument: rule.policyDocument, matches });
     }
@@ -46,18 +88,70 @@ export function securityPassed(evidence) {
     && evidence.requiredVerifiers.every(id => evidence.checks?.some(c => c.id === id && c.required === true && c.status === 'PASS'))
     && evidence.checks?.every(c => c.required !== true || c.status === 'PASS');
 }
-export async function verifySecurity({ workspace, sbi, assessment, policy, config, headSha, verification }) {
+// #184: the one classification of the changed files for the content checks, shared by the Harness run and CI. An entry is deleted, uninspectable
+// (binary, a submodule or a mode-only change: no line to read), the SBI snapshot the Harness writes from the Issue (secret-scan only), or content.
+// The diff never has renames or copies (--no-renames), so a moved file is a deletion and an addition with added lines.
+// A blank line is an added line too, so lines are counted, not read from the joined text.
+const lineCount = (count, text) => count ?? (text ? text.split('\n').length : 0);
+export function securityTargets(files) {
+  return files.map(f => {
+    const addedLines = lineCount(f.addedLines, f.added), deletedLines = lineCount(f.deletedLines, f.deleted);
+    return { ...f, addedLines, deletedLines, target: f.status === 'D' ? 'deleted'
+      : f.binary || (f.status !== 'A' && !addedLines && !deletedLines && f.modeChanged) ? 'uninspectable'
+        : snapshotFilePattern.test(f.path) ? 'snapshot' : 'content' };
+  });
+}
+// The Harness run reads its committed diff whole; a file the SBI allows by name but the diff lacks is read when it exists and is no diff entry.
+export function localTargets(files, allowedFiles = []) {
+  const paths = new Set(files.map(f => f.path));
+  return [...securityTargets(files), ...allowedFiles.filter(path => !paths.has(path)).map(path => ({ path, optional: true }))];
+}
+// No line was added: every entry besides the snapshot deletes a file or only loses lines, with no binary or mode change.
+const deletionOnly = targets => targets.some(t => t.target !== 'snapshot')
+  && targets.every(t => t.target === 'snapshot' || t.target === 'deleted' || (t.target === 'content' && t.status === 'M' && !t.addedLines && !t.modeChanged));
+// A content scan exception drops only the named strings from the one file it names, for the verifiers it names, and says why.
+const scanText = (policy, id, file) => (policy.contentScanExceptions || []).filter(e => e.path === file.path && e.verifiers.includes(id))
+  .reduce(({ text, exceptions }, e) => {
+    const rest = e.ignoredPatterns.reduce((t, p) => t.replace(new RegExp(p, 'gm'), ''), text);
+    return { text: rest, exceptions: rest === text ? exceptions : [...exceptions, { path: file.path, reason: e.reason }] };
+  }, { text: file.text, exceptions: [] });
+// changed lists the targets from securityTargets: CI passes the added lines of each changed file (envTemplate marks a vetted .env template),
+// a Harness run reads its committed diff whole from the workspace. entries is the number of diff entries; every entry must land in one bucket.
+// An empty diff, a diff of the SBI snapshot alone, a missing changed file or an entry left out fails; a deletion-only diff passes as such.
+// runCommands is false in the Completion Judge: a command verifier runs in the verifier matrix, and one that did not run there FAILs,
+// so the judge never runs the PR's code (#165).
+export async function verifySecurity({ workspace, assessment, policy, config, headSha, verification, changed, entries = changed?.filter(c => !c.optional).length ?? 0, runCommands = true }) {
   const registry = new Map(policy.verifiers.map(v => [v.id, v]));
   for (const adapter of config.securityVerifiers || []) {
     if (registry.has(adapter.id) && registry.get(adapter.id).kind !== 'command') throw new Error('Builtin security verifiers cannot be overridden');
     registry.set(adapter.id, { ...adapter, kind: 'command' });
   }
   const checks = [], violations = [];
-  const content = [];
-  for (const path of sbi.allowedFiles) {
-    if (isSecretPath(path)) { violations.push({ code: 'prohibited_secret_path', path }); continue; }
-    try { content.push({ path, text: await readFile(join(workspace,path), 'utf8') }); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  const content = [], raw = [], deleted = [], uninspectable = [], secretPaths = [];
+  const contentKinds = new Set(['secret', 'pii-log', 'forbidden']);
+  if (!changed && assessment.requiredVerifiers.some(id => contentKinds.has(registry.get(id)?.kind))) throw new Error('Security content checks need the changed files to scan');
+  const targets = (changed ?? []).map(c => ({ target: 'content', ...c }));
+  for (const t of targets) {
+    const { path, text, envTemplate } = t;
+    if (t.target === 'deleted') { deleted.push(path); continue; }
+    if (isSecretPath(path) && !envTemplate) { violations.push({ code: 'prohibited_secret_path', path }); secretPaths.push(path); continue; }
+    const missing = () => { if (!t.optional) violations.push({ code: 'missing_changed_file', path }); };
+    if (t.missing) { missing(); if (t.target === 'uninspectable') uninspectable.push(path); continue; }
+    // An uninspectable file has no line to scan, but secret-scan still reads its bytes (#184); it is not counted as scanned.
+    if (t.target === 'uninspectable') {
+      uninspectable.push(path);
+      // The bytes are read as they are and without NUL bytes, so a UTF-16 encoded value is found as well.
+      try { const bytes = text ?? await readFile(join(workspace, path), 'latin1'); raw.push({ path, text: `${bytes}\n${bytes.replaceAll('\0', '')}` }); }
+      catch (e) { if (e.code !== 'ENOENT') throw e; missing(); }
+      continue;
+    }
+    if (text !== undefined) { content.push({ path, text, snapshot: t.target === 'snapshot', optional: t.optional }); continue; }
+    try { content.push({ path, text: await readFile(join(workspace,path), 'utf8'), snapshot: t.target === 'snapshot', optional: t.optional }); }
+    catch (e) { if (e.code !== 'ENOENT') throw e; missing(); }
   }
+  const diffTargets = targets.filter(t => !t.optional);
+  const onlyDeleted = deletionOnly(diffTargets);
+  const diff = { entries, deletedFiles: deleted.length, deletedLines: diffTargets.reduce((n, t) => n + lineCount(t.deletedLines, t.deleted), 0) };
   for (const id of assessment.requiredVerifiers) {
     const adapter = registry.get(id);
     const general = verification?.checks?.find(c=>c.id===id);
@@ -65,21 +159,35 @@ export async function verifySecurity({ workspace, sbi, assessment, policy, confi
     if (!adapter || (adapter.kind === 'command' && !adapter.commands?.length)) {
       checks.push({ id, verifier: id, required: true, status: 'NOT_CONFIGURED', reason: 'required security verifier is not configured' }); continue;
     }
+    if (adapter.kind === 'command' && !runCommands) {
+      checks.push({ id, verifier: id, required: true, status: 'FAIL', reason: 'required security verifier did not run in the verifier matrix' }); continue;
+    }
     if (adapter.kind === 'command') {
       const cwd = join(workspace, adapter.directory || '.');
-      const processes = [];
-      for (const [command,...args] of adapter.commands) processes.push(await execute(command,args,{cwd,timeoutMs:config.timeoutMs}));
-      const unavailable=processes.some(p=>p.error?.includes('ENOENT'));
-      checks.push({id,verifier:id,required:true,status:unavailable?'NOT_CONFIGURED':processes.every(p=>p.ok)?'PASS':'FAIL',cwd,processes});
+      const {status,reason,failure,phases,processes}=await runIsolated({workspace,adapter,config,cwd});
+      checks.push({id,verifier:id,required:true,status,...(reason&&{reason}),...(failure&&{failure}),...(phases&&{phases}),cwd,isolation:adapter.isolation||'container',processes});
     } else {
       const patterns = adapter.kind === 'secret' ? policy.secretPatterns : adapter.kind === 'pii-log' ? policy.piiLogPatterns : policy.forbiddenPatterns;
-      const findings = [];
-      for (const file of content) {
-        if (adapter.kind === 'secret' && hasSecret(file.text)) findings.push({path:file.path,code:'credential_value'});
-        for (let i=0;i<patterns.length;i++) if (new RegExp(patterns[i],'im').test(file.text)) findings.push({path:file.path,code:adapter.kind,patternIndex:i});
+      // The SBI snapshot is Issue text the Harness wrote, not code: only secret-scan reads it (#184).
+      const files = content.filter(f => adapter.kind === 'secret' || !f.snapshot);
+      const excluded = content.filter(f => adapter.kind !== 'secret' && f.snapshot).map(f => f.path);
+      const findings = [], exceptions = [];
+      for (const file of [...files, ...adapter.kind === 'secret' ? raw : []]) {
+        const { text, exceptions: applied } = scanText(policy, id, file);
+        exceptions.push(...applied);
+        if (adapter.kind === 'secret' && hasTrackedCredential(file.path, text)) findings.push({path:file.path,code:'credential_value'});
+        for (let i=0;i<patterns.length;i++) if (new RegExp(patterns[i],'im').test(text)) findings.push({path:file.path,code:adapter.kind,patternIndex:i});
       }
       violations.push(...findings.map(f=>({...f,verifier:id})));
-      checks.push({id,verifier:id,required:true,status:findings.length?'FAIL':'PASS',findings});
+      const scanned = files.map(f=>f.path);
+      const accounted = files.filter(f => !f.optional).length + excluded.length + deleted.length + uninspectable.length + secretPaths.length;
+      const reason = !entries ? 'no changed file to scan'
+        : !diffTargets.some(t => t.target !== 'snapshot') ? 'no change besides the SBI snapshot to scan'
+          : accounted !== entries ? `targets account for ${accounted} of ${entries} diff entries`
+            : onlyDeleted ? 'deletion-only' : undefined;
+      const failed = findings.length || reason && reason !== 'deletion-only' || violations.some(v => v.code === 'missing_changed_file');
+      checks.push({ id, verifier: id, required: true, status: failed ? 'FAIL' : 'PASS', ...(reason && { reason }), scanned, excluded, deleted, uninspectable, secretPaths,
+        diff, ...(exceptions.length && { exceptions }), findings });
     }
   }
   for (const id of registry.keys()) if (!assessment.requiredVerifiers.includes(id)) checks.push({id,verifier:id,required:false,status:'SKIP',reason:'not applicable to this change'});

@@ -1,20 +1,16 @@
 {
   "version": 1,
+  "description": "SBI承認で人間が判断するSecurity rule（#175）。承認済みSBIに実装前Gateは置かず、LEVEL 3・必須Security Verifier・実装後の異なる2人以上のReviewを強制する。SBIが宣言していない一致はNEEDS_HUMAN_DECISIONで止める。",
   "preImplementationRuleIds": [
     "SEC-AUTH-001",
     "SEC-AUTHZ-001",
     "SEC-RLS-001",
     "SEC-PII-001",
     "SEC-SECRET-001",
-    "SEC-MIGRATION-001",
-    "SEC-SCHEMA-001",
     "SEC-ROLE-001",
-    "SEC-CONFIG-001",
-    "SEC-CICD-001",
-    "SEC-INFRA-001",
+    "SEC-PRODINFRA-001",
     "SEC-DESTRUCTIVE-001",
     "SEC-LIFECYCLE-001",
-    "SEC-LOG-001",
-    "SEC-DESIGN-001"
+    "SEC-LOG-001"
   ]
 }

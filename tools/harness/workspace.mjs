@@ -1,8 +1,9 @@
 import { mkdir, readdir, readFile, lstat, realpath } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
-import { isSecretPath, hasSecret, isSafeEnvTemplate } from './evidence-protection.mjs';
+import { isSecretPath, hasTrackedCredential, isSafeEnvTemplate } from './evidence-protection.mjs';
 import { execute, exists } from './io.mjs';
+import { contractPath } from './api-contract-path.mjs';
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const gitOptions = ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.name=SONOMAMA Harness', '-c', 'user.email=harness@localhost'];
 export async function git(workspace, args, optional = false) {
@@ -12,13 +13,18 @@ export async function git(workspace, args, optional = false) {
 }
 export function assertWritablePath(path, { allowSensitiveDeclaration = false } = {}) {
   if (!allowSensitiveDeclaration && isSecretPath(path)) throw new Error('scope/path is a prohibited secret file');
-  if (/(^|\/)(\.git|\.harness|\.github|\.githooks|node_modules|sources|tools)(\/|$)|(^|\/)AGENTS\.md$/.test(path)) throw new Error(`scope/path is reserved: ${path}`);
+  if (/(^|\/)(\.git|\.harness|\.github|\.githooks|\.ai|node_modules|sources|tools)(\/|$)|(^|\/)AGENTS\.md$/.test(path)) throw new Error(`scope/path is reserved: ${path}`);
   if (/\.(test|spec)\.[^/]+$/.test(path) && !/^(apps|packages|prototypes)\//.test(path)) throw new Error(`trusted test path is reserved: ${path}`);
+  // Generated Trusted Acceptance (#147) lives in these app directories; only the Harness registration writes there.
+  if (/^apps\/[^/]+\/spec\/acceptance(\/|$)|(^|\/)__acceptance__(\/|$)/i.test(path)) throw new Error(`generated acceptance path is reserved: ${path}`);
 }
 export async function sourceIntegrity(root, baselineSha) {
   const head = (await git(root, ['rev-parse', 'HEAD'])).stdout.trim();
   const dirty = (await git(root, ['status', '--porcelain', '--untracked-files=all'])).stdout;
-  if (dirty || (baselineSha && head !== baselineSha)) throw new Error('Source must be clean; uncommitted inputs or source HEAD changed');
+  if (dirty || (baselineSha && head !== baselineSha)) {
+    // Uncommitted files alone can be cleaned up and retried; a moved HEAD cannot.
+    throw Object.assign(new Error('Source must be clean; uncommitted inputs or source HEAD changed'), { code: baselineSha && head === baselineSha ? 'SOURCE_DIRTY' : 'SOURCE_CHANGED' });
+  }
   return head;
 }
 export async function prepareWorkspace(root, workspace) {
@@ -31,15 +37,26 @@ export async function prepareWorkspace(root, workspace) {
     if (info.isSymbolicLink()) throw new Error('tracked symlink is not permitted in a worktree');
     const content = (await readFile(join(root, path))).toString('utf8');
     if (isSafeEnvTemplate(path,content)) continue;
-    const trustedSource = /^tools\/harness\/.*\.test\.mjs$/.test(path);
-    const credentialFound = trustedSource ? /gh[pousr]_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----\r?\n/.test(content) : hasSecret(content);
-    if (isSecretPath(path) || credentialFound) throw new Error('tracked credential detected; remove sensitive material before creating a worktree');
+    if (isSecretPath(path) || hasTrackedCredential(path, content)) throw new Error('tracked credential detected; remove sensitive material before creating a worktree');
   }
   await mkdir(dirname(workspace), { recursive: true });
   await git(root, ['worktree', 'add', '--detach', workspace, baseline]);
   const { json } = await import('./io.mjs');
   await json(join(workspace, '..', 'workspace-exclusions.json'), []);
   return baseline;
+}
+// prepareWorkspace's checks on Git objects, for the files a PR head changes since its merge base with base, before any checkout.
+export async function assertSafeCommit(root, base, head) {
+  const paths = (await git(root, ['diff', '--no-renames', '--diff-filter=d', '--name-only', '-z', `${base}...${head}`])).stdout.split('\0').filter(Boolean);
+  for (const path of paths) {
+    if (/^\.harness\/(state\/human|state\/runs|runs|exports)\//.test(path) && !path.endsWith('/.gitkeep')) throw new Error(`tracked operational evidence is prohibited: ${path}`);
+    const [mode, , object] = (await git(root, ['ls-tree', head, '--', path])).stdout.split(/\s+/);
+    if (mode === '120000') throw new Error(`tracked symlink is not permitted in a worktree: ${path}`);
+    if (mode === '160000') throw new Error(`submodule is not permitted in a worktree: ${path}`);
+    const content = (await git(root, ['cat-file', 'blob', object])).stdout;
+    if (isSafeEnvTemplate(path, content)) continue;
+    if (isSecretPath(path) || hasTrackedCredential(path, content)) throw new Error(`tracked credential detected in ${path}; remove sensitive material before creating a worktree`);
+  }
 }
 export async function assertWorktreeOwner(root, workspace, baselineSha) {
   const source = (await git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).stdout.trim();
@@ -61,18 +78,43 @@ export async function workspaceIntegrity(workspace, headSha) {
   const dirty = (await git(workspace, ['status', '--porcelain', '--untracked-files=all'])).stdout;
   if (current !== headSha || dirty) throw new Error('HEAD/snapshot changed; checks and approvals must be regenerated in a new run');
 }
+// #184: paths are literal, never pathspecs; what is binary and which lines changed come from the blobs, never from a .gitattributes in the tree under review (an empty attribute source
+// and no attributes file), and the lines are read by the hunk headers, so an added line that starts with "++" or spells "Binary files" stays a line.
+const emptyTree = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+const plainDiff = ['--literal-pathspecs', '--attr-source', emptyTree, '-c', 'core.attributesFile=/dev/null', 'diff', '--no-ext-diff', '--no-textconv', '--no-renames'];
+function hunkLines(diff) {
+  const added = [], deleted = [], lines = diff.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(lines[i]);
+    if (!hunk) continue;
+    let minus = Number(hunk[1] ?? 1), plus = Number(hunk[2] ?? 1);
+    while ((minus > 0 || plus > 0) && ++i < lines.length) {
+      const line = lines[i];
+      if (line.startsWith('-') && minus > 0) { deleted.push(line.slice(1)); minus--; }
+      else if (line.startsWith('+') && plus > 0) { added.push(line.slice(1)); plus--; }
+      else if (!line.startsWith('\\')) throw new Error('git diff: unexpected hunk line');
+    }
+  }
+  return { added, deleted };
+}
 export async function changedFiles(workspace, baselineSha, headSha) {
-  const names = (await git(workspace, ['diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--name-status', '-z', baselineSha, headSha])).stdout.split('\0').filter(Boolean);
+  const names = (await git(workspace, [...plainDiff, '--name-status', '-z', baselineSha, headSha])).stdout.split('\0').filter(Boolean);
+  // Git counts no lines of a blob with a NUL byte; with no attributes, nothing else makes a file binary.
+  const numstat = (await git(workspace, [...plainDiff, '--numstat', '-z', baselineSha, headSha])).stdout.split('\0').filter(Boolean);
+  const binary = new Set(numstat.filter(entry => entry.startsWith('-\t-\t')).map(entry => entry.slice(4)));
   const files = [];
   for (let i = 0; i < names.length; i += 2) {
     const status = names[i], path = names[i + 1];
-    const diff = (await git(workspace, ['diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--unified=0', baselineSha, headSha, '--', path])).stdout;
-    const lines = diff.split('\n');
-    const tree = (await git(workspace, ['ls-tree', headSha, '--', path])).stdout;
-    files.push({ path, status, mode: tree.slice(0, 6), modeChanged: /^old mode /m.test(diff), binary: diff.includes('Binary files '),
-      added: lines.filter(s => s.startsWith('+') && !s.startsWith('+++')).map(s => s.slice(1)).join('\n'),
-      deleted: lines.filter(s => s.startsWith('-') && !s.startsWith('---')).map(s => s.slice(1)).join('\n') });
+    const diff = (await git(workspace, [...plainDiff, '--unified=0', baselineSha, headSha, '--', path])).stdout;
+    const header = diff.split(/^@@ /m)[0];
+    const { added, deleted } = binary.has(path) ? { added: [], deleted: [] } : hunkLines(diff);
+    const tree = (await git(workspace, ['--literal-pathspecs', 'ls-tree', headSha, '--', path])).stdout;
+    files.push({ path, status, mode: tree.slice(0, 6), modeChanged: /^old mode /m.test(header), binary: binary.has(path),
+      added: added.join('\n'), deleted: deleted.join('\n'), addedLines: added.length, deletedLines: deleted.length });
   }
+  // SEC-AUTH-001 judges the API contract from the whole file before and after (#243); a new contract has nothing before.
+  const show = async (rev, path) => { const r = await git(workspace, ['show', `${rev}:${path}`]).catch(() => null); return r?.stdout; };
+  for (const f of files.filter(f => contractPath.test(f.path))) Object.assign(f, { before: f.status === 'A' ? undefined : await show(baselineSha, f.path), after: f.status === 'D' ? undefined : await show(headSha, f.path) });
   return files;
 }
 export async function toolFingerprint(root) {

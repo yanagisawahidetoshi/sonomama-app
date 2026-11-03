@@ -1,10 +1,19 @@
 {
   "version": 1,
-  "provider": "fake",
+  "provider": "claude",
   "sbi": ".harness/state/sample-sbi.json",
   "maxConsecutiveFailures": 3,
   "maxIterations": 5,
   "timeoutMs": 120000,
+  "providerTimeoutMs": 600000,
+  "setupTimeoutMs": 360000,
+  "github": {
+    "remote": "origin",
+    "base": "main",
+    "requiredChecks": [
+      "harness"
+    ]
+  },
   "verifiers": [
     {
       "id": "rails",
@@ -14,17 +23,203 @@
         "RSpec",
         "RuboCop",
         "Brakeman",
-        "OpenAPI"
+        "Bundler Audit",
+        "Zeitwerk"
       ],
-      "commands": [],
+      "commands": [
+        [
+          "node",
+          "../../tools/harness/api-contract.mjs",
+          "--routes"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "../../compose.yaml",
+          "build",
+          "api"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "../../compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "api",
+          "bin/rails",
+          "db:prepare"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "../../compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "-e",
+          "API_CONTRACT_COVERAGE=required",
+          "api",
+          "bundle",
+          "exec",
+          "rspec"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "../../compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "api",
+          "bundle",
+          "exec",
+          "rubocop"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "../../compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "api",
+          "bundle",
+          "exec",
+          "brakeman",
+          "--no-pager",
+          "--quiet"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "../../compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "api",
+          "bundle",
+          "exec",
+          "bundler-audit",
+          "check",
+          "--update"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "../../compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "api",
+          "bin/rails",
+          "zeitwerk:check"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "../../compose.yaml",
+          "down"
+        ]
+      ],
       "appliesTo": [
         "^apps/api/",
         "^packages/",
+        "^compose\\.yaml$",
         "^(package\\.json|pnpm-lock\\.yaml|pnpm-workspace\\.yaml|\\.npmrc|\\.ruby-version|\\.tool-versions|tsconfig[^/]*)$"
       ],
       "lanes": [
         "production"
-      ]
+      ],
+      "areas": [
+        "api"
+      ],
+      "isolation": "compose",
+      "network": true
+    },
+    {
+      "id": "api-acceptance",
+      "directory": "apps/api",
+      "marker": "Gemfile",
+      "planned": [
+        "Trusted Acceptance"
+      ],
+      "commands": [],
+      "acceptanceIds": [
+        "API-AC-1",
+        "API-AC-2",
+        "API-AC-3",
+        "API-AC-4",
+        "API-AC-5",
+        "API-AC-6",
+        "API-AC-7",
+        "API-AC-8",
+        "API-AC-9",
+        "API-AC-10",
+        "API-AC-11",
+        "API-AC-12",
+        "API-AC-13",
+        "API-AC-14",
+        "API-AC-15",
+        "API-AC-16",
+        "API-AC-17",
+        "API-AC-18",
+        "API-AC-19",
+        "API-AC-20",
+        "API-AC-21",
+        "API-AC-22"
+      ],
+      "appliesTo": [],
+      "lanes": [
+        "production"
+      ],
+      "trust": "acceptance",
+      "trustedScript": ".harness/verification/api-env.mjs"
+    },
+    {
+      "id": "api-contract",
+      "directory": "packages/api-schema",
+      "marker": "openapi.yaml",
+      "planned": [
+        "OpenAPI 3.1 validation",
+        "Breaking change detection against the base branch",
+        "Rails routes defined by the contract",
+        "Prism Mock starts from the workspace OpenAPI and answers each documented GET"
+      ],
+      "commands": [
+        [
+          "node",
+          "../../tools/harness/api-contract.mjs"
+        ],
+        [
+          "node",
+          "../../tools/harness/api-mock-check.mjs"
+        ]
+      ],
+      "appliesTo": [
+        "^packages/api-schema/"
+      ],
+      "lanes": [
+        "production"
+      ],
+      "areas": [
+        "api-contract"
+      ],
+      "isolation": "harness"
     },
     {
       "id": "expo",
@@ -32,20 +227,160 @@
       "marker": "package.json",
       "planned": [
         "TypeScript",
-        "ESLint",
+        "Biome",
+        "Jest",
         "RNTL",
-        "Storybook",
-        "Maestro"
+        "Expo Doctor"
       ],
-      "commands": [],
+      "commands": [
+        [
+          "pnpm",
+          "run",
+          "typecheck"
+        ],
+        [
+          "pnpm",
+          "run",
+          "check"
+        ],
+        [
+          "pnpm",
+          "run",
+          "test"
+        ],
+        [
+          "pnpm",
+          "run",
+          "check:architecture"
+        ],
+        [
+          "pnpm",
+          "run",
+          "test:architecture"
+        ],
+        [
+          "pnpm",
+          "run",
+          "doctor"
+        ]
+      ],
       "appliesTo": [
         "^apps/mobile/",
         "^packages/",
-        "^(package\\.json|pnpm-lock\\.yaml|pnpm-workspace\\.yaml|\\.npmrc|\\.ruby-version|\\.tool-versions|tsconfig[^/]*)$"
+        "^(package\\.json|pnpm-lock\\.yaml|pnpm-workspace\\.yaml|\\.npmrc|\\.node-version|\\.nvmrc|\\.ruby-version|\\.tool-versions|tsconfig[^/]*)$"
       ],
       "lanes": [
         "production"
-      ]
+      ],
+      "areas": [
+        "mobile"
+      ],
+      "network": true,
+      "gatedCommands": [
+        {
+          "command": [
+            "pnpm",
+            "run",
+            "doctor"
+          ],
+          "appliesTo": [
+            "^apps/mobile/(package\\.json|app\\.json|app\\.config\\.[^/]+|eas\\.json|babel\\.config\\.[^/]+|metro\\.config\\.[^/]+|react-native\\.config\\.[^/]+|(ios|android)/)",
+            "^(package\\.json|pnpm-workspace\\.yaml|\\.npmrc|\\.node-version|\\.nvmrc|\\.tool-versions)$"
+          ]
+        }
+      ],
+      "setupCommands": [
+        [
+          "pnpm",
+          "install",
+          "--frozen-lockfile",
+          "--offline",
+          "--filter",
+          "mobile"
+        ]
+      ],
+      "dependencyStore": "pnpm"
+    },
+    {
+      "id": "mobile-acceptance",
+      "directory": "apps/mobile",
+      "marker": "package.json",
+      "planned": [
+        "Trusted Acceptance"
+      ],
+      "commands": [],
+      "acceptanceIds": [
+        "MOBILE-AC-1",
+        "MOBILE-AC-2",
+        "MOBILE-AC-3",
+        "MOBILE-AC-4",
+        "MOBILE-AC-5",
+        "MOBILE-AC-6",
+        "MOBILE-AC-7",
+        "MOBILE-AC-8",
+        "MOBILE-AC-9",
+        "MOBILE-AC-10",
+        "MOBILE-AC-11",
+        "MOBILE-AC-12",
+        "MOBILE-AC-13",
+        "MOBILE-AC-14",
+        "MOBILE-AC-15",
+        "MOBILE-AC-16",
+        "MOBILE-AC-17",
+        "MOBILE-AC-18",
+        "MOBILE-AC-19",
+        "MOBILE-AC-20",
+        "MOBILE-AC-21",
+        "MOBILE-AC-22",
+        "MOBILE-AC-23",
+        "MOBILE-AC-24",
+        "MOBILE-AC-25",
+        "MOBILE-AC-26",
+        "MOBILE-AC-27",
+        "MOBILE-AC-28"
+      ],
+      "appliesTo": [],
+      "lanes": [
+        "production"
+      ],
+      "trust": "acceptance",
+      "trustedScript": ".harness/verification/mobile-env.mjs"
+    },
+    {
+      "id": "mobile-arch-acceptance",
+      "directory": "apps/mobile",
+      "marker": "package.json",
+      "planned": [
+        "Trusted Acceptance"
+      ],
+      "commands": [],
+      "acceptanceIds": [
+        "MOBILE-ARCH-AC-1",
+        "MOBILE-ARCH-AC-2",
+        "MOBILE-ARCH-AC-3",
+        "MOBILE-ARCH-AC-4",
+        "MOBILE-ARCH-AC-5",
+        "MOBILE-ARCH-AC-6",
+        "MOBILE-ARCH-AC-7",
+        "MOBILE-ARCH-AC-8",
+        "MOBILE-ARCH-AC-9",
+        "MOBILE-ARCH-AC-10",
+        "MOBILE-ARCH-AC-11",
+        "MOBILE-ARCH-AC-12",
+        "MOBILE-ARCH-AC-13",
+        "MOBILE-ARCH-AC-14",
+        "MOBILE-ARCH-AC-15",
+        "MOBILE-ARCH-AC-16",
+        "MOBILE-ARCH-AC-17",
+        "MOBILE-ARCH-AC-18",
+        "MOBILE-ARCH-AC-19"
+      ],
+      "appliesTo": [],
+      "lanes": [
+        "production"
+      ],
+      "trust": "acceptance",
+      "trustedScript": ".harness/verification/mobile-arch.mjs"
     },
     {
       "id": "admin",
@@ -53,14 +388,55 @@
       "marker": "package.json",
       "planned": [
         "TypeScript",
-        "ESLint",
+        "Biome",
         "Vitest",
         "RTL",
-        "Storybook",
-        "Playwright",
-        "VRT"
+        "build",
+        "Storybook build"
       ],
-      "commands": [],
+      "commands": [
+        [
+          "pnpm",
+          "run",
+          "typecheck"
+        ],
+        [
+          "pnpm",
+          "run",
+          "check"
+        ],
+        [
+          "pnpm",
+          "run",
+          "test"
+        ],
+        [
+          "pnpm",
+          "run",
+          "check:architecture"
+        ],
+        [
+          "pnpm",
+          "run",
+          "test:architecture"
+        ],
+        [
+          "pnpm",
+          "run",
+          "build",
+          "--outDir",
+          "node_modules/.harness/dist",
+          "--emptyOutDir"
+        ],
+        [
+          "pnpm",
+          "run",
+          "build-storybook",
+          "--output-dir",
+          "node_modules/.harness/storybook-static",
+          "--quiet"
+        ]
+      ],
       "appliesTo": [
         "^apps/admin/",
         "^packages/",
@@ -68,7 +444,93 @@
       ],
       "lanes": [
         "production"
-      ]
+      ],
+      "areas": [
+        "admin"
+      ],
+      "network": true,
+      "setupCommands": [
+        [
+          "pnpm",
+          "install",
+          "--frozen-lockfile",
+          "--offline",
+          "--filter",
+          "admin"
+        ]
+      ],
+      "dependencyStore": "pnpm"
+    },
+    {
+      "id": "admin-acceptance",
+      "directory": "apps/admin",
+      "marker": "package.json",
+      "planned": [
+        "Trusted Acceptance"
+      ],
+      "commands": [],
+      "acceptanceIds": [
+        "ADMIN-AC-1",
+        "ADMIN-AC-2",
+        "ADMIN-AC-3",
+        "ADMIN-AC-4",
+        "ADMIN-AC-5",
+        "ADMIN-AC-6",
+        "ADMIN-AC-7",
+        "ADMIN-AC-8",
+        "ADMIN-AC-9",
+        "ADMIN-AC-10",
+        "ADMIN-AC-11",
+        "ADMIN-AC-12",
+        "ADMIN-AC-13",
+        "ADMIN-AC-14",
+        "ADMIN-AC-15",
+        "ADMIN-AC-16"
+      ],
+      "appliesTo": [],
+      "lanes": [
+        "production"
+      ],
+      "trust": "acceptance",
+      "trustedScript": ".harness/verification/admin-env.mjs"
+    },
+    {
+      "id": "admin-arch-acceptance",
+      "directory": "apps/admin",
+      "marker": "package.json",
+      "planned": [
+        "Trusted Acceptance"
+      ],
+      "commands": [],
+      "acceptanceIds": [
+        "ADMIN-ARCH-AC-1",
+        "ADMIN-ARCH-AC-2",
+        "ADMIN-ARCH-AC-3",
+        "ADMIN-ARCH-AC-4",
+        "ADMIN-ARCH-AC-5",
+        "ADMIN-ARCH-AC-6",
+        "ADMIN-ARCH-AC-7",
+        "ADMIN-ARCH-AC-8",
+        "ADMIN-ARCH-AC-9",
+        "ADMIN-ARCH-AC-10",
+        "ADMIN-ARCH-AC-11",
+        "ADMIN-ARCH-AC-12",
+        "ADMIN-ARCH-AC-13",
+        "ADMIN-ARCH-AC-14",
+        "ADMIN-ARCH-AC-15",
+        "ADMIN-ARCH-AC-16",
+        "ADMIN-ARCH-AC-17",
+        "ADMIN-ARCH-AC-18",
+        "ADMIN-ARCH-AC-19",
+        "ADMIN-ARCH-AC-20",
+        "ADMIN-ARCH-AC-21"
+      ],
+      "appliesTo": [],
+      "lanes": [
+        "production"
+      ],
+      "trust": "acceptance",
+      "trustedScript": ".harness/verification/admin-arch.mjs"
     },
     {
       "id": "prototype-web",
@@ -84,9 +546,9 @@
       ],
       "planned": [
         "TypeScript",
-        "ESLint",
-        "Prettier",
-        "build/export"
+        "Biome",
+        "Vite build",
+        "Storybook build"
       ],
       "commands": [
         [
@@ -97,19 +559,71 @@
         [
           "pnpm",
           "run",
-          "lint"
+          "check"
         ],
         [
           "pnpm",
           "run",
-          "format:check"
+          "build",
+          "--outDir",
+          "node_modules/.harness/dist",
+          "--emptyOutDir"
         ],
         [
           "pnpm",
           "run",
-          "build"
+          "build-storybook",
+          "--output-dir",
+          "node_modules/.harness/storybook-static",
+          "--quiet"
         ]
-      ]
+      ],
+      "areas": [
+        "prototype-web"
+      ],
+      "network": true,
+      "setupCommands": [
+        [
+          "pnpm",
+          "install",
+          "--frozen-lockfile",
+          "--offline",
+          "--filter",
+          "prototype-web"
+        ]
+      ],
+      "dependencyStore": "pnpm"
+    },
+    {
+      "id": "prototype-web-acceptance",
+      "directory": "prototypes/web",
+      "marker": "package.json",
+      "planned": [
+        "Trusted Acceptance"
+      ],
+      "commands": [],
+      "acceptanceIds": [
+        "PWEB-AC-1",
+        "PWEB-AC-2",
+        "PWEB-AC-3",
+        "PWEB-AC-4",
+        "PWEB-AC-5",
+        "PWEB-AC-6",
+        "PWEB-AC-7",
+        "PWEB-AC-8",
+        "PWEB-AC-9",
+        "PWEB-AC-10",
+        "PWEB-AC-11",
+        "PWEB-AC-12",
+        "PWEB-AC-13"
+      ],
+      "appliesTo": [],
+      "lanes": [
+        "prototype",
+        "production"
+      ],
+      "trust": "acceptance",
+      "trustedScript": ".harness/verification/prototype-web-env.mjs"
     },
     {
       "id": "prototype-mobile",
@@ -117,7 +631,7 @@
       "marker": "package.json",
       "appliesTo": [
         "^prototypes/mobile/",
-        "^(package\\.json|pnpm-lock\\.yaml|pnpm-workspace\\.yaml|\\.npmrc|tsconfig[^/]*)$"
+        "^(package\\.json|pnpm-lock\\.yaml|pnpm-workspace\\.yaml|\\.npmrc|\\.node-version|\\.nvmrc|\\.tool-versions|tsconfig[^/]*)$"
       ],
       "lanes": [
         "prototype",
@@ -125,9 +639,8 @@
       ],
       "planned": [
         "TypeScript",
-        "ESLint",
-        "Prettier",
-        "build/export"
+        "Biome",
+        "Expo Doctor"
       ],
       "commands": [
         [
@@ -138,22 +651,563 @@
         [
           "pnpm",
           "run",
-          "lint"
+          "check"
         ],
         [
           "pnpm",
           "run",
-          "format:check"
-        ],
-        [
-          "pnpm",
-          "run",
-          "build"
+          "doctor"
         ]
-      ]
+      ],
+      "areas": [
+        "prototype-mobile"
+      ],
+      "network": true,
+      "gatedCommands": [
+        {
+          "command": [
+            "pnpm",
+            "run",
+            "doctor"
+          ],
+          "appliesTo": [
+            "^prototypes/mobile/(package\\.json|app\\.json|app\\.config\\.[^/]+|eas\\.json|babel\\.config\\.[^/]+|metro\\.config\\.[^/]+|react-native\\.config\\.[^/]+|(ios|android)/)",
+            "^(package\\.json|pnpm-workspace\\.yaml|\\.npmrc|\\.node-version|\\.nvmrc|\\.tool-versions)$"
+          ]
+        }
+      ],
+      "setupCommands": [
+        [
+          "pnpm",
+          "install",
+          "--frozen-lockfile",
+          "--offline",
+          "--filter",
+          "prototype-mobile"
+        ]
+      ],
+      "dependencyStore": "pnpm"
+    },
+    {
+      "id": "prototype-mobile-acceptance",
+      "directory": "prototypes/mobile",
+      "marker": "package.json",
+      "planned": [
+        "Trusted Acceptance"
+      ],
+      "commands": [],
+      "acceptanceIds": [
+        "PMOB-AC-1",
+        "PMOB-AC-2",
+        "PMOB-AC-3",
+        "PMOB-AC-4",
+        "PMOB-AC-5",
+        "PMOB-AC-6",
+        "PMOB-AC-7",
+        "PMOB-AC-8",
+        "PMOB-AC-9",
+        "PMOB-AC-10",
+        "PMOB-AC-11",
+        "PMOB-AC-12",
+        "PMOB-AC-13",
+        "PMOB-AC-14",
+        "PMOB-AC-15",
+        "PMOB-AC-16"
+      ],
+      "appliesTo": [],
+      "lanes": [
+        "prototype",
+        "production"
+      ],
+      "trust": "acceptance",
+      "trustedScript": ".harness/verification/prototype-mobile-env.mjs"
+    },
+    {
+      "id": "ci-matrix-acceptance",
+      "directory": ".",
+      "planned": [
+        "Trusted Acceptance"
+      ],
+      "commands": [],
+      "acceptanceIds": [
+        "CI-AC-1",
+        "CI-AC-2",
+        "CI-AC-3",
+        "CI-AC-4",
+        "CI-AC-5",
+        "CI-AC-6",
+        "CI-AC-7",
+        "CI-AC-8",
+        "CI-AC-9",
+        "CI-AC-10",
+        "CI-AC-11",
+        "CI-AC-12",
+        "CI-AC-13",
+        "CI-AC-14",
+        "CI-AC-15",
+        "CI-AC-16",
+        "CI-AC-17",
+        "CI-AC-18"
+      ],
+      "appliesTo": [],
+      "lanes": [
+        "production"
+      ],
+      "trust": "acceptance",
+      "trustedScript": ".harness/verification/ci-matrix.mjs"
     }
   ],
-  "semanticReview": {
-    "enabled": false
+  "securityVerifiers": [
+    {
+      "id": "migration-safety",
+      "directory": ".",
+      "commands": [
+        [
+          "node",
+          "tools/harness/migration-safety.mjs"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "build",
+          "api"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "-e",
+          "DATABASE_URL=postgres://postgres@db:5432/sonomama_migration_safety_test",
+          "-e",
+          "SCHEMA=/rails/tmp/migration-safety-schema.rb",
+          "api",
+          "bin/rails",
+          "db:drop",
+          "db:create",
+          "db:migrate"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "-e",
+          "DATABASE_URL=postgres://postgres@db:5432/sonomama_migration_safety_test",
+          "-e",
+          "SCHEMA=/rails/tmp/migration-safety-schema.rb",
+          "api",
+          "bin/rails",
+          "db:migrate",
+          "VERSION=0"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "-e",
+          "DATABASE_URL=postgres://postgres@db:5432/sonomama_migration_safety_test",
+          "-e",
+          "SCHEMA=/rails/tmp/migration-safety-schema.rb",
+          "api",
+          "bin/rails",
+          "db:migrate"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "-e",
+          "DATABASE_URL=postgres://postgres@db:5432/sonomama_migration_safety_test",
+          "-e",
+          "SCHEMA=/rails/tmp/migration-safety-schema.rb",
+          "api",
+          "bin/rails",
+          "db:drop"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "down"
+        ]
+      ],
+      "isolation": "compose",
+      "network": true
+    },
+    {
+      "id": "rails-authz-test",
+      "directory": ".",
+      "commands": [
+        [
+          "node",
+          "tools/harness/authorization-specs.mjs"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "build",
+          "api"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "-e",
+          "DATABASE_URL=postgres://postgres@db:5432/sonomama_authz_test",
+          "api",
+          "bin/rails",
+          "db:prepare"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "-e",
+          "DATABASE_URL=postgres://postgres@db:5432/sonomama_authz_test",
+          "api",
+          "bundle",
+          "exec",
+          "ruby",
+          "-e",
+          "require \"rspec/core\"; require \"json\"; out = \"tmp/harness-security-rspec.json\"; RSpec.configure { |c| c.fail_if_no_examples = true }; status = RSpec::Core::Runner.run([\"spec/authorization\", \"--format\", \"progress\", \"--format\", \"json\", \"--out\", out]); s = JSON.parse(File.read(out))[\"summary\"]; declared = RSpec.world.example_groups.flat_map(&:descendants).sum { |g| g.examples.size }; problems = []; problems << \"no example ran\" if s[\"example_count\"].zero?; problems << \"#{s[\"pending_count\"]} pending or skipped\" if s[\"pending_count\"].positive?; problems << \"#{declared - s[\"example_count\"]} of #{declared} examples not run (focus or a filter)\" if s[\"example_count\"] != declared; warn \"Security specs: #{problems.join(\"; \")}\" unless problems.empty?; exit(status.zero? && problems.empty? ? 0 : 1)"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "down"
+        ]
+      ],
+      "isolation": "compose",
+      "network": true
+    },
+    {
+      "id": "authn-test",
+      "directory": ".",
+      "commands": [
+        [
+          "node",
+          "tools/harness/security-specs.mjs",
+          "authn-test"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "build",
+          "api"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "-e",
+          "DATABASE_URL=postgres://postgres@db:5432/sonomama_authn_test",
+          "api",
+          "bin/rails",
+          "db:prepare"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "-e",
+          "DATABASE_URL=postgres://postgres@db:5432/sonomama_authn_test",
+          "api",
+          "bundle",
+          "exec",
+          "ruby",
+          "-e",
+          "require \"rspec/core\"; require \"json\"; out = \"tmp/harness-security-rspec.json\"; RSpec.configure { |c| c.fail_if_no_examples = true }; status = RSpec::Core::Runner.run([\"spec/authentication\", \"--format\", \"progress\", \"--format\", \"json\", \"--out\", out]); s = JSON.parse(File.read(out))[\"summary\"]; declared = RSpec.world.example_groups.flat_map(&:descendants).sum { |g| g.examples.size }; problems = []; problems << \"no example ran\" if s[\"example_count\"].zero?; problems << \"#{s[\"pending_count\"]} pending or skipped\" if s[\"pending_count\"].positive?; problems << \"#{declared - s[\"example_count\"]} of #{declared} examples not run (focus or a filter)\" if s[\"example_count\"] != declared; warn \"Security specs: #{problems.join(\"; \")}\" unless problems.empty?; exit(status.zero? && problems.empty? ? 0 : 1)"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "down"
+        ]
+      ],
+      "isolation": "compose",
+      "network": true
+    },
+    {
+      "id": "rails-rls-test",
+      "directory": ".",
+      "commands": [
+        [
+          "node",
+          "tools/harness/security-specs.mjs",
+          "rails-rls-test"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "build",
+          "api"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "-e",
+          "DATABASE_URL=postgres://postgres@db:5432/sonomama_rls_test",
+          "api",
+          "bin/rails",
+          "db:prepare"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "-e",
+          "DATABASE_URL=postgres://postgres@db:5432/sonomama_rls_test",
+          "api",
+          "bundle",
+          "exec",
+          "ruby",
+          "-e",
+          "require \"rspec/core\"; require \"json\"; out = \"tmp/harness-security-rspec.json\"; RSpec.configure { |c| c.fail_if_no_examples = true }; status = RSpec::Core::Runner.run([\"spec/rls\", \"--format\", \"progress\", \"--format\", \"json\", \"--out\", out]); s = JSON.parse(File.read(out))[\"summary\"]; declared = RSpec.world.example_groups.flat_map(&:descendants).sum { |g| g.examples.size }; problems = []; problems << \"no example ran\" if s[\"example_count\"].zero?; problems << \"#{s[\"pending_count\"]} pending or skipped\" if s[\"pending_count\"].positive?; problems << \"#{declared - s[\"example_count\"]} of #{declared} examples not run (focus or a filter)\" if s[\"example_count\"] != declared; warn \"Security specs: #{problems.join(\"; \")}\" unless problems.empty?; exit(status.zero? && problems.empty? ? 0 : 1)"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "down"
+        ]
+      ],
+      "isolation": "compose",
+      "network": true
+    },
+    {
+      "id": "data-lifecycle-test",
+      "directory": ".",
+      "commands": [
+        [
+          "node",
+          "tools/harness/security-specs.mjs",
+          "data-lifecycle-test"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "build",
+          "api"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "-e",
+          "DATABASE_URL=postgres://postgres@db:5432/sonomama_data_lifecycle_test",
+          "api",
+          "bin/rails",
+          "db:prepare"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "run",
+          "--rm",
+          "-e",
+          "RAILS_ENV=test",
+          "-e",
+          "DATABASE_URL=postgres://postgres@db:5432/sonomama_data_lifecycle_test",
+          "api",
+          "bundle",
+          "exec",
+          "ruby",
+          "-e",
+          "require \"rspec/core\"; require \"json\"; out = \"tmp/harness-security-rspec.json\"; RSpec.configure { |c| c.fail_if_no_examples = true }; status = RSpec::Core::Runner.run([\"spec/data_lifecycle\", \"--format\", \"progress\", \"--format\", \"json\", \"--out\", out]); s = JSON.parse(File.read(out))[\"summary\"]; declared = RSpec.world.example_groups.flat_map(&:descendants).sum { |g| g.examples.size }; problems = []; problems << \"no example ran\" if s[\"example_count\"].zero?; problems << \"#{s[\"pending_count\"]} pending or skipped\" if s[\"pending_count\"].positive?; problems << \"#{declared - s[\"example_count\"]} of #{declared} examples not run (focus or a filter)\" if s[\"example_count\"] != declared; warn \"Security specs: #{problems.join(\"; \")}\" unless problems.empty?; exit(status.zero? && problems.empty? ? 0 : 1)"
+        ],
+        [
+          "docker",
+          "compose",
+          "-f",
+          "compose.yaml",
+          "down"
+        ]
+      ],
+      "isolation": "compose",
+      "network": true
+    },
+    {
+      "id": "admin-authn-test",
+      "directory": "apps/admin",
+      "commands": [
+        [
+          "node",
+          "../../tools/harness/security-specs.mjs",
+          "admin-authn-test"
+        ],
+        [
+          "pnpm",
+          "exec",
+          "vitest",
+          "run",
+          "src/features/auth/",
+          "--reporter=default",
+          "--reporter=json",
+          "--outputFile.json=/tmp/harness-security-tests.json"
+        ],
+        [
+          "node",
+          "../../tools/harness/security-specs.mjs",
+          "admin-authn-test",
+          "--report",
+          "/tmp/harness-security-tests.json"
+        ]
+      ],
+      "network": true,
+      "setupCommands": [
+        [
+          "pnpm",
+          "install",
+          "--frozen-lockfile",
+          "--offline",
+          "--filter",
+          "admin"
+        ]
+      ],
+      "dependencyStore": "pnpm"
+    },
+    {
+      "id": "mobile-authn-test",
+      "directory": "apps/mobile",
+      "commands": [
+        [
+          "node",
+          "../../tools/harness/security-specs.mjs",
+          "mobile-authn-test"
+        ],
+        [
+          "pnpm",
+          "exec",
+          "jest",
+          "--ci",
+          "--json",
+          "--outputFile=/tmp/harness-security-tests.json",
+          "src/features/auth/"
+        ],
+        [
+          "node",
+          "../../tools/harness/security-specs.mjs",
+          "mobile-authn-test",
+          "--report",
+          "/tmp/harness-security-tests.json"
+        ]
+      ],
+      "network": true,
+      "setupCommands": [
+        [
+          "pnpm",
+          "install",
+          "--frozen-lockfile",
+          "--offline",
+          "--filter",
+          "mobile"
+        ]
+      ],
+      "dependencyStore": "pnpm"
+    }
+  ],
+  "impact": {
+    "crossLayer": [
+      {
+        "all": [
+          "api"
+        ],
+        "any": [
+          "mobile",
+          "admin"
+        ],
+        "add": [
+          "api-contract"
+        ]
+      }
+    ],
+    "fullGate": [
+      "^tools/harness/",
+      "^\\.harness/(config|verification|rules|skills)/",
+      "^\\.github/",
+      "^\\.githooks/",
+      "^AGENTS\\.md$",
+      "^\\.ai/"
+    ],
+    "toolchain": [
+      "^\\.node-version$",
+      "^\\.tool-versions$",
+      "^package\\.json$",
+      "^pnpm-workspace\\.yaml$",
+      "^\\.npmrc$"
+    ]
   }
 }

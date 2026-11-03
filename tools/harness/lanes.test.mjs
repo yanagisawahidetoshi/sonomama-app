@@ -8,13 +8,14 @@ import {recordDecision} from './human-approvals.mjs';
 const state='.harness/state/sample-sbi.json';
 describe('Lane quality and promotion enforcement',()=>{
   describe('given a dummy-data prototype with independent acceptance checks',()=>{
-    it('when light gates pass then permits review without production human approval or auto merge',()=>fixture(async root=>{
+    // #220: this run comes from --sbi PATH, a local self-test, so it is never auto merge eligible; the prototype rule itself is in risk-policy.test.mjs.
+    it('when light gates pass then needs no human approval, while the --sbi run is not auto merge eligible',()=>fixture(async root=>{
       const {agent}=await prototype(root);
       const run=await runFixture({root,quiet:true,agent});
       assert.equal(run.lane.name,'prototype'); assert.equal(run.gate.required,false);
       assert.equal(run.executionStatus,'DONE'); assert.equal(run.status,'MERGE_ALLOWED');
       assert.equal(run.risk.level,1);
-      assert.ok(run.risk.reasons.includes('explicit_safe_prototype_only')); assert.equal(run.merge.requiredApprovals,0);assert.equal(run.merge.autoMergeEligible,false);
+      assert.ok(run.risk.reasons.includes('default_low')); assert.equal(run.merge.requiredApprovals,0);assert.equal(run.merge.autoMergeEligible,false);
       const check=run.iterations[0].verification.checks.find(c=>c.id==='prototype-web');
       assert.equal(check.processes.length,4);assert.equal(check.status,'PASS');
       assert.ok(run.iterations[0].securityVerification.requiredVerifiers.includes('secret-scan'));
@@ -25,33 +26,30 @@ describe('Lane quality and promotion enforcement',()=>{
       assert.equal(run.status,'ESCALATED');assert.notEqual(run.executionStatus,'DONE');
       assert.equal(run.iterations[0].verification.checks.find(c=>c.id==='prototype-web').status,'FAIL');
     }));
-    it('when a prototype touches Production API then stops for Security before calling agent',()=>fixture(async root=>{
-      await prototype(root);await update(root,state,s=>s.description='Connect Production API');
-      const run=await runFixture({root,quiet:true,agent:async()=>{throw Error('must not run')}});
-      assert.equal(run.lane.name,'production');assert.equal(run.gate.required,true);assert.equal(run.status,'WAITING_FOR_HUMAN_GATE');assert.equal(run.iterations.length,0);
+    // #175: the approved SBI already names Production API, so the run is promoted to the Production lane and Security level 3, not stopped.
+    it('when an approved prototype SBI touches Production API then runs in the Production lane at level 3 without an implementation gate',()=>fixture(async root=>{
+      const {agent}=await prototype(root);await update(root,state,s=>s.description='Connect Production API');
+      let called=false;
+      const run=await runFixture({root,quiet:true,agent:async()=>{called=true;return agent();}});
+      assert.equal(run.lane.name,'production');assert.equal(run.gate.required,false);assert.equal(called,true);
+      assert.equal(run.riskPreflight.level,3);assert.equal(run.events.some(e=>e.status==='WAITING_FOR_HUMAN_GATE'),false);
     }));
-    it('when promoting then Design Approval is independent from post-implementation merge approval',()=>fixture(async root=>{
+    // #155: the SBI Issue approval already decides the production implementation, so a promotion adds no Design Approval Gate.
+    it('when promoting a prototype then the run implements without a Design Approval and only merge approval remains',()=>fixture(async root=>{
       const {agent}=await prototype(root,{promotion:true});
       const run=await runFixture({root,quiet:true,agent});
-      assert.equal(run.executionStatus,'PENDING');assert.equal(run.designApproval.required,true);
-      assert.equal(run.status,'WAITING_FOR_DESIGN_APPROVAL');
+      assert.equal(run.executionStatus,'DONE');assert.equal(run.designApproval,undefined);
+      assert.notEqual(run.status,'WAITING_FOR_DESIGN_APPROVAL');
       assert.deepEqual(run.gate,{required:false,state:'NOT_REQUIRED'});
-      assert.equal(JSON.parse(await readFile(join(root,run.runDir,'human-gate.json'),'utf8')).state,'NOT_REQUIRED');
-      await assert.rejects(recordDecision({root,runId:run.id,purpose:'merge',identityProvider:human('designer')}),/gate|Execution/);
-      await recordDecision({root,runId:run.id,purpose:'design-approval',identityProvider:human('designer')});
-      const done=await resumeRun({root,runId:run.id,quiet:true,agent});
-      assert.equal(done.designApproval.state,'APPROVED');assert.equal(done.executionStatus,'DONE');
-      assert.deepEqual(done.gate,{required:false,state:'NOT_REQUIRED'});
-      assert.equal(JSON.parse(await readFile(join(root,run.runDir,'human-gate.json'),'utf8')).state,'NOT_REQUIRED');
-      assert.equal(done.lane.name,'production');assert.equal(done.status,'WAITING_FOR_HUMAN_REVIEW');assert.equal(done.merge.validApprovals,0);
+      assert.equal(run.lane.name,'production');assert.equal(run.status,'WAITING_FOR_HUMAN_REVIEW');
+      assert.equal(await readFile(join(root,run.runDir,'design-approval.json'),'utf8').catch(()=>null),null);
       await recordDecision({root,runId:run.id,purpose:'merge',identityProvider:human('reviewer')});
       assert.equal((await resumeRun({root,runId:run.id,quiet:true})).status,'MERGE_ALLOWED');
-      await recordDecision({root,runId:run.id,purpose:'design-approval',decision:'REVOKE',identityProvider:human('designer')});
-      const revoked=await resumeRun({root,runId:run.id,quiet:true});
-      assert.equal(revoked.status,'WAITING_FOR_DESIGN_APPROVAL');
-      assert.equal(revoked.merge.state,'WAITING_FOR_DESIGN_APPROVAL');
-      assert.deepEqual(revoked.gate,{required:false,state:'NOT_REQUIRED'});
-      assert.equal(revoked.designApproval.state,'WAITING_FOR_DESIGN_APPROVAL');
+    }));
+    it('when a Design Approval is recorded then it is rejected as an unknown purpose',()=>fixture(async root=>{
+      const {agent}=await prototype(root,{promotion:true});
+      const run=await runFixture({root,quiet:true,agent});
+      await assert.rejects(recordDecision({root,runId:run.id,purpose:'design-approval',identityProvider:human('designer')}),/purpose|Invalid/);
     }));
   });
 });

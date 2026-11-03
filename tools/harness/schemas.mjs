@@ -1,36 +1,126 @@
 import { z } from 'zod';
+import { posix } from 'node:path';
+import { states } from './state-machine.mjs';
+import { escalationCodes } from './escalation.mjs';
 const text = z.string().min(1);
+// implementation: feature work (Maestro against the mock API). validation: optional real API + Rails + DB E2E after every implementation SBI.
+// Human acceptance changes no code and runs no test, so it is a PBI Gate (pbiAcceptanceRecordSchema), never an SBI kind.
+export const sbiKinds = Object.freeze(['implementation', 'validation']);
+// A Harness-owned script (node tools/harness/*.mjs) only parses workspace files and runs on the host.
+export const isHarnessScript = (directory, [command, script]) => command === 'node' && /^tools\/harness\/[^/]+\.mjs$/.test(posix.normalize(posix.join(directory, script || '')));
+export const isComposeCommand = ([docker, compose, flag, file]) => docker === 'docker' && compose === 'compose' && flag === '-f' && Boolean(file);
+function isolationRules(v, ctx) {
+  const all = [...(v.setupCommands ?? []), ...v.commands];
+  if (v.isolation === 'harness' && !all.every(c => isHarnessScript(v.directory, c))) ctx.addIssue({ code: 'custom', message: 'harness isolation only runs tools/harness scripts' });
+  if (v.dependencyStore && v.isolation !== 'container') ctx.addIssue({ code: 'custom', message: 'the shared dependency store is only for container isolation' });
+  if (v.isolation === 'compose' && (!v.network || !all.every(c => isComposeCommand(c) || isHarnessScript(v.directory, c)))) ctx.addIssue({ code: 'custom', message: 'compose isolation only runs docker compose -f FILE or tools/harness scripts and requires network' });
+}
+// Setup commands run before the verification commands, each phase with its own time limit (#246).
+const phaseSettings = { setupCommands: z.array(z.array(text).min(1)).default([]), setupTimeoutMs: z.number().int().min(100).max(1800000).optional(), timeoutMs: z.number().int().min(100).max(600000).optional(),
+  // #272: install from the pnpm store shared across runs, which only the Harness fetch writes to (container isolation only).
+  dependencyStore: z.enum(['pnpm']).optional() };
 export const relativePath = text.refine(p => !p.startsWith('/') && !p.includes('\\') && p.split('/').every(s => s !== '..' && s !== '.' && s !== ''), 'unsafe relative path');
+// A directory scope ends with '/' so it can never be read as a file name, and allowedFiles keeps meaning exactly those files.
+export const directoryPath = text.refine(p => p.endsWith('/') && relativePath.safeParse(p.slice(0, -1)).success, 'directory scope must be a safe relative path ending with /');
 export const sbiSchema = z.strictObject({
-  id: text.regex(/^[A-Za-z0-9_-]+$/), title: text, description: text,
+  id: text.regex(/^[A-Za-z0-9_-]+$/), kind: z.enum(sbiKinds).default('implementation'), title: text, description: text,
   gherkin: text.refine(s => ['Feature:', 'Scenario:', 'Given ', 'When ', 'Then '].every(k => s.includes(k)), 'BDD/Gherkin required'),
   acceptanceCriteria: z.array(z.strictObject({ id: text, description: text, verifier: text })).min(1),
-  allowedFiles: z.array(relativePath).min(1), risks: z.array(text),
+  allowedFiles: z.array(relativePath).default([]), allowedDirs: z.array(directoryPath).default([]), risks: z.array(text),
   ambiguous: z.boolean(), requiresDesignDecision: z.boolean(),
   securityImpact: z.array(text).default([]), requiredSecurityRules: z.array(text).default([]),
-  requiredVerifiers: z.array(text).default([]), preImplementationGate: z.boolean().default(false),
-  promotion: z.strictObject({ source: relativePath.refine(p => /^prototypes\/(web|mobile)(\/|$)/.test(p)), designApproval: z.null().optional() }).optional(),
-  minimumRiskLevel: z.union([z.literal(2), z.literal(3)]).default(2),
-}).refine(s => new Set(s.acceptanceCriteria.map(a => a.id)).size === s.acceptanceCriteria.length, 'duplicate acceptance criteria');
+  requiredVerifiers: z.array(text).default([]), affectedAreas: z.array(text).default([]), preImplementationGate: z.boolean().default(false),
+  // Records which prototype a production SBI adopts. The SBI Issue approval decides the implementation; there is no separate Design Approval (#155).
+  promotion: z.strictObject({ source: relativePath.refine(p => /^prototypes\/(web|mobile)(\/|$)/.test(p)) }).optional(),
+  // The level the SBI itself declares, from the Planner's Risk candidate. LEVEL 1 is the default, and rules can only raise it (#157).
+  minimumRiskLevel: z.union([z.literal(1), z.literal(2), z.literal(3)]).default(1),
+  // The Planner's expected number of changed files, from the SBI Issue. Hand-written SBI JSON has none.
+  estimatedFiles: z.number().int().min(0).nullable().optional(),
+  // The E2E line of the SBI Issue's verification; it decides the Maestro lane of a mobile SBI.
+  e2e: z.string().nullable().optional(),
+  issueUrl: z.url().optional(), pbiUrl: z.url().optional(),
+}).refine(s => new Set(s.acceptanceCriteria.map(a => a.id)).size === s.acceptanceCriteria.length, 'duplicate acceptance criteria')
+  .refine(s => s.allowedFiles.length + s.allowedDirs.length > 0, 'allowedFiles or allowedDirs required');
+// Run IDs name directories and refs; the same pattern guards run-store paths.
+export const runIdSchema = text.regex(/^[A-Za-z0-9][A-Za-z0-9_-]{1,150}$/);
+const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
+// What a Harness Run took from its approved SBI Issue when it started. Generated by the Harness, never written by hand.
+export const sbiSnapshotSchema = z.strictObject({
+  version: z.literal(1),
+  source: z.strictObject({ repo: text.regex(/^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/), number: z.number().int().positive(), url: z.url() }),
+  runId: runIdSchema, titleDigest: sha256, bodyDigest: sha256, sbi: sbiSchema,
+}).refine(s => s.source.url === `https://github.com/${s.source.repo}/issues/${s.source.number}`, 'source url must be the source repo and number')
+  .refine(s => s.sbi.issueUrl === s.source.url, 'sbi.issueUrl must be the source Issue');
+// .harness/acceptance/sbi-<N>.json: the Trusted Acceptance a human wrote and registered for one SBI Issue before marking it ready.
+export const acceptanceRegistrationSchema = z.strictObject({
+  version: z.literal(1), sbiIssue: z.number().int().positive(),
+  verifiers: z.array(z.strictObject({ id: text, trustedScript: relativePath, planned: z.array(text).min(1), acceptanceIds: z.array(text).min(1) })).min(1),
+});
+// Version 2: Trusted Acceptance generated in a run from an approved spec (#147). Bound to the spec digest and to every test file.
+export const generatedRegistrationSchema = z.strictObject({
+  version: z.literal(2), sbiIssue: z.number().int().positive(), specDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  generator: z.strictObject({ provider: text, runId: text }), adapter: z.literal('rails-request-spec'),
+  tests: z.array(z.strictObject({ path: relativePath, sha256: z.string().regex(/^[0-9a-f]{64}$/) })).min(1),
+  // The spec helpers and support files the generated tests run with, as they were when the tests were checked.
+  protectedFiles: z.array(z.strictObject({ path: relativePath, sha256: z.string().regex(/^[0-9a-f]{64}$/) })),
+  mapping: z.array(z.strictObject({ scenario: text, acceptanceIds: z.array(text).min(1), examples: z.array(z.strictObject({ path: relativePath, description: text })).min(1) })).min(1),
+});
+// The generated acceptance report one verifier matrix leg leaves for the Completion Judge (#147). It comes from a job that ran PR code.
+export const acceptanceResultSchema = z.strictObject({
+  sbiIssue: z.number().int().positive(), headSha: z.string().regex(/^[0-9a-f]{40}$/),
+  report: z.strictObject({
+    examples: z.array(z.strictObject({ description: z.string(), status: z.string(), exceptionClass: z.string().nullable(), message: z.string().nullable() })),
+    errorsOutsideOfExamples: z.number().int().min(0), error: z.string().optional(),
+  }),
+});
+export const providerTimeoutMs = config => config.providerTimeoutMs ?? config.timeoutMs;
 export const configSchema = z.strictObject({
   version: z.literal(1), provider: z.enum(['fake', 'codex', 'claude']), sbi: relativePath,
   maxConsecutiveFailures: z.number().int().min(1).max(3), maxIterations: z.number().int().min(1).max(20),
   timeoutMs: z.number().int().min(100).max(600000),
-  securityVerifiers: z.array(z.strictObject({ id: text, directory: z.union([z.literal('.'), relativePath]), commands: z.array(z.array(text).min(1)) })).default([]),
-  semanticReview: z.strictObject({ enabled: z.boolean() }).default({ enabled: false }),
+  // A provider call (implementation, Acceptance generation, controlled violation, AI Review, Planner) reads files, decides and writes several of
+  // them, so it gets its own limit; verifiers and Trusted Acceptance scripts keep timeoutMs. Without it, providers fall back to timeoutMs.
+  providerTimeoutMs: z.number().int().min(100).max(1800000).optional(),
+  // #246: the limit of each setup command (dependency install); a verifier may set its own setupTimeoutMs and timeoutMs.
+  setupTimeoutMs: z.number().int().min(100).max(1800000).optional(),
+  securityVerifiers: z.array(z.strictObject({ id: text, directory: z.union([z.literal('.'), relativePath]), commands: z.array(z.array(text).min(1)), ...phaseSettings,
+    isolation: z.enum(['container', 'compose', 'harness']).default('container'), network: z.boolean().default(false) }).superRefine(isolationRules)).default([]),
+  // Untrusted verifier commands run in a Docker container; docker names the trusted CLI that starts it.
+  isolation: z.strictObject({ docker: text }).default({ docker: 'docker' }),
+  // GitHub PR mode. requiredChecks are combined with the ruleset's required status checks of the base branch.
+  github: z.strictObject({ remote: text, base: text, requiredChecks: z.array(text) }).default({ remote: 'origin', base: 'main', requiredChecks: ['harness'] }),
   verifiers: z.array(z.strictObject({ id: text, directory: z.union([z.literal('.'), relativePath]), marker: relativePath.optional(),
-    allowMissing: z.boolean().default(true), planned: z.array(text).min(1), commands: z.array(z.array(text).min(1)),
+    allowMissing: z.boolean().default(true), planned: z.array(text).min(1), commands: z.array(z.array(text).min(1)), ...phaseSettings,
     acceptanceIds: z.array(text).default([]),
     appliesTo: z.array(text).optional(),
     lanes: z.array(z.enum(['prototype', 'production'])).default(['prototype', 'production']),
     trust: z.enum(['application', 'acceptance']).default('application'),
     trustedScript: relativePath.optional(),
-  })).min(1),
+    // Trusted Acceptance a human registered for one SBI Issue; its acceptanceIds are that Issue's acceptance criteria.
+    sbiIssue: z.number().int().positive().optional(),
+    // Trusted Acceptance generated in the run from a version 2 registration (#147); it runs the generated specs, not a trustedScript.
+    generated: z.boolean().optional(),
+    areas: z.array(text).default([]),
+    // container: workspace-only Docker container. compose: Harness-started Compose after the file is checked.
+    // harness: a Harness-owned script that only parses workspace files. network grants egress to this verifier only.
+    isolation: z.enum(['container', 'compose', 'harness']).default('container'),
+    network: z.boolean().default(false),
+    // A command that runs only when the change matches appliesTo, whatever else requires the verifier.
+    gatedCommands: z.array(z.strictObject({ command: z.array(text).min(1), appliesTo: z.array(text).min(1) })).default([]),
+  }).superRefine(isolationRules).refine(v => v.gatedCommands.every(g => v.commands.some(c => c.join('\0') === g.command.join('\0'))), 'gated command must be one of the verifier commands')).min(1),
+  // SBI Impact Analysis: cross-layer contracts added when areas meet, paths whose change runs the Full Gate,
+  // and shared toolchain paths whose change runs the Full Gate and every application verifier.
+  impact: z.strictObject({
+    crossLayer: z.array(z.strictObject({ all: z.array(text).min(1), any: z.array(text).min(1), add: z.array(text).min(1) })).default([]),
+    fullGate: z.array(text).default([]),
+    toolchain: z.array(text).default([]),
+  }).default({ crossLayer: [], fullGate: [], toolchain: [] }),
 }).refine(c => new Set(c.verifiers.map(v => v.id)).size === c.verifiers.length && !c.verifiers.some(v => v.id === 'sample-bdd'), 'duplicate or reserved verifier');
+// Migration and ADR left the Human Gate with #157: an ordinary schema change or an ADR needs one review, not two humans before implementation.
 export const rulesSchema = z.strictObject({
-  humanGate: z.array(z.enum(['AuthN', 'AuthZ', 'RLS', 'PII', 'Migration', 'ADR'])).length(6),
+  humanGate: z.array(z.enum(['AuthN', 'AuthZ', 'RLS', 'PII'])).length(4),
   protectedPathPatterns: z.array(text).min(1), maxFileBytes: z.number().int().positive(),
-}).refine(r => new Set(r.humanGate).size === 6, 'all Human Gates required');
+}).refine(r => new Set(r.humanGate).size === 4, 'all Human Gates required');
 export const responseSchema = z.strictObject({
   files: z.array(z.strictObject({ path: relativePath, content: z.string() })).max(20),
   escalation: z.string().nullable().optional(),
@@ -43,13 +133,27 @@ export const responseJsonSchema = {
   },
 };
 
+// AI Review (#187): the provider CLI answers with this object only. The SHA binds the review to what the Harness showed it.
+export const aiReviewResponseSchema = z.strictObject({
+  headSha: z.string().regex(/^[0-9a-f]{40,64}$/), status: z.enum(['PASS', 'FAIL']), riskLevel: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+  reasons: z.array(z.string().max(500)).max(20),
+});
+export const aiReviewJsonSchema = {
+  type: 'object', additionalProperties: false, required: ['headSha', 'status', 'riskLevel', 'reasons'],
+  properties: {
+    headSha: { type: 'string' }, status: { type: 'string', enum: ['PASS', 'FAIL'] }, riskLevel: { type: 'integer', enum: [1, 2, 3] },
+    reasons: { type: 'array', maxItems: 20, items: { type: 'string', maxLength: 500 } },
+  },
+};
+
 const line = text.max(200);
 export const plannedSbiSchema = z.strictObject({
-  id: text.max(20), title: text.max(80), purpose: text.max(300),
+  id: text.max(20), kind: z.enum(sbiKinds), title: text.max(80), purpose: text.max(300),
   scope: z.strictObject({ included: z.array(line).max(8), excluded: z.array(line).max(8) }),
   acceptanceCriteria: z.array(z.strictObject({ id: text.max(20), description: z.string().max(200) })).max(12),
-  scenarios: z.array(z.strictObject({ name: line, given: z.array(line).max(8), when: z.array(line).max(8), then: z.array(line).max(8), acceptanceIds: z.array(text.max(20)).max(12) })).max(12),
+  scenarios: z.array(z.strictObject({ name: line, given: z.array(line).max(8), when: z.array(line).max(8), then: z.array(line).max(8), acceptanceIds: z.array(text.max(20)).max(12), test: z.string().max(120) })).max(12),
   dependsOn: z.array(text.max(20)).max(12), changeAreas: z.array(z.string().max(80)).max(12),
+  layers: z.array(z.string().max(80)).max(8), estimatedFiles: z.number().int().min(0).max(200), oversizeReason: z.string().max(300).nullable(),
   riskCandidate: z.enum(['L1', 'L2', 'L3']), securityImpact: z.array(z.string().max(40)).max(12),
   verification: z.strictObject({ applicationTest: z.string().max(120), acceptance: z.string().max(120), e2e: z.string().max(120) }),
 });
@@ -58,11 +162,11 @@ const strings = { type: 'array', items: { type: 'string' } };
 const object = (properties) => ({ type: 'object', additionalProperties: false, required: Object.keys(properties), properties });
 export const planJsonSchema = object({
   sbis: { type: 'array', items: object({
-    id: { type: 'string' }, title: { type: 'string' }, purpose: { type: 'string' },
+    id: { type: 'string' }, kind: { type: 'string', enum: [...sbiKinds] }, title: { type: 'string' }, purpose: { type: 'string' },
     scope: object({ included: strings, excluded: strings }),
     acceptanceCriteria: { type: 'array', items: object({ id: { type: 'string' }, description: { type: 'string' } }) },
-    scenarios: { type: 'array', items: object({ name: { type: 'string' }, given: strings, when: strings, then: strings, acceptanceIds: strings }) },
-    dependsOn: strings, changeAreas: strings,
+    scenarios: { type: 'array', items: object({ name: { type: 'string' }, given: strings, when: strings, then: strings, acceptanceIds: strings, test: { type: 'string' } }) },
+    dependsOn: strings, changeAreas: strings, layers: strings, estimatedFiles: { type: 'integer', minimum: 0 }, oversizeReason: { type: ['string', 'null'] },
     riskCandidate: { type: 'string', enum: ['L1', 'L2', 'L3'] }, securityImpact: strings,
     verification: object({ applicationTest: { type: 'string' }, acceptance: { type: 'string' }, e2e: { type: 'string' } }),
   }) },
@@ -71,43 +175,112 @@ export const planJsonSchema = object({
 // GitHub REST responses carry many more fields; only the ones the Planner relies on are validated.
 export const githubIssueSchema = z.object({
   number: z.number().int().positive(), title: z.string(), body: z.string().nullable().default(null), html_url: z.url(),
-  state: z.string().optional(), labels: z.array(z.object({ name: z.string() })).default([]), pull_request: z.unknown().optional(),
+  state: z.string().optional(), state_reason: z.string().nullable().optional(), labels: z.array(z.object({ name: z.string(), color: z.string().optional() })).default([]), pull_request: z.unknown().optional(),
 });
 export const githubIssueListSchema = z.array(githubIssueSchema);
-export const githubCommentSchema = z.object({ id: z.number().int().positive(), body: z.string().nullable().default(null), html_url: z.url() });
+// Only the fields that decide whether a dependency SBI was merged through its Harness PR, and when and by whom ready was added or the title changed (#194, #200).
+export const githubTimelineSchema = z.array(z.object({ event: z.string().nullable().optional(), created_at: z.string().nullable().optional(), label: z.object({ name: z.string(), color: z.string().optional() }).nullable().optional(),
+  actor: z.object({ login: z.string(), type: z.string().optional() }).nullable().optional(), rename: z.object({ from: z.string(), to: z.string() }).nullable().optional(),
+  source: z.object({ issue: z.object({ number: z.number().int().positive(), html_url: z.url(), pull_request: z.unknown().optional() }).optional() }).nullable().optional() }));
+export const githubPullSchema = z.object({
+  number: z.number().int().positive(), merged_at: z.string().nullable(), merge_commit_sha: z.string().nullable().optional(), base: z.object({ ref: z.string() }), body: z.string().nullable().default(null),
+  user: z.object({ login: z.string(), type: z.string() }).nullable().optional(),
+  head: z.object({ ref: z.string().optional(), sha: z.string(), repo: z.object({ full_name: z.string() }).nullable() }).optional(),
+});
+export const githubPullCommitsSchema = z.array(z.object({
+  commit: z.object({ message: z.string(), verification: z.object({ verified: z.boolean() }).optional() }),
+  author: z.object({ login: z.string() }).nullable().optional(),
+}));
+// .harness/rules/dependency-bots.json: the bots whose dependency PRs need no SBI Issue, and the only files such a PR may change.
+export const dependencyBotPolicySchema = z.strictObject({
+  version: z.literal(1),
+  bots: z.array(z.strictObject({ login: text.regex(/\[bot\]$/), type: z.literal('Bot') })),
+  paths: z.array(relativePath),
+});
+export const githubCommentSchema = z.object({ id: z.number().int().positive(), body: z.string().nullable().default(null), html_url: z.url(),
+  user: z.object({ login: z.string(), type: z.string().optional() }).nullable().optional(), created_at: z.string().optional(), updated_at: z.string().optional() });
 export const githubCommentListSchema = z.array(githubCommentSchema);
+export const githubLabelListSchema = z.array(z.object({ name: z.string() }));
 
 export const riskPolicySchema = z.strictObject({
-  version: z.literal(1), defaultLevel: z.literal(2),
+  version: z.literal(1), defaultLevel: z.literal(1),
   levels: z.strictObject({
     '1': z.strictObject({ requiredHumanApprovals: z.literal(0), autoMerge: z.literal(true) }),
     '2': z.strictObject({ requiredHumanApprovals: z.literal(1), autoMerge: z.literal(false) }),
     '3': z.strictObject({ requiredHumanApprovals: z.number().int().min(2), autoMerge: z.literal(false) }),
   }),
   pathRules: z.array(z.strictObject({ id: text, pattern: text, minimumLevel: z.union([z.literal(2), z.literal(3)]) })).min(1),
-  metadataRules: z.array(z.strictObject({ id: text, pattern: text, minimumLevel: z.union([z.literal(2), z.literal(3)]) })).min(1),
-  safeRules: z.array(z.strictObject({ id: text, pattern: text, candidateLevel: z.literal(1), requiredLane: z.enum(['prototype', 'production']).optional(), allowedStatuses: z.array(z.enum(['A', 'M'])), maxChangedBytes: z.number().int().positive() })),
+  // ignoredPatterns drop phrases that only negate the rule (no authentication needed) from the text before pattern is tested (#233).
+  metadataRules: z.array(z.strictObject({ id: text, pattern: text, minimumLevel: z.union([z.literal(2), z.literal(3)]), ignoredPatterns: z.array(text).optional() })).min(1),
+  // ADR-0006: a deleted test file, a skipped or focused test and a removed assertion never merge automatically. A test file is pathPattern;
+  // weakeningPattern reads its added lines and assertionPattern its removed lines.
+  testProtection: z.strictObject({ pathPattern: text, weakeningPattern: text, assertionPattern: text, minimumLevel: z.literal(2) }),
 });
 export const approvalRecordSchema = z.strictObject({
-  id: text, runId: text, purpose: z.enum(['implementation-gate', 'design-approval', 'merge']),
+  id: text, runId: text, purpose: z.enum(['implementation-gate', 'merge']),
   reviewer: text, kind: z.literal('human'), identitySource: text,
   decision: z.enum(['APPROVE', 'REQUEST_CHANGES', 'REVOKE']), approvedAt: z.iso.datetime(),
   commitSha: z.string().regex(/^[0-9a-f]{40,64}$/), contextDigest: text, signature: text,
 });
 
+// The PBI Human Acceptance Gate is bound to the PBI and the evidence it confirms (validation evidence, or the merged implementation evidence).
+// It is separate from the SBI approval and merge records and never substitutes for them.
+export const pbiAcceptanceRecordSchema = z.strictObject({
+  id: text, purpose: z.literal('pbi-acceptance'), pbiUrl: z.url(), reviewer: text, kind: z.literal('human'), identitySource: text,
+  decision: z.enum(['APPROVE', 'REQUEST_CHANGES', 'REVOKE']), decidedAt: z.iso.datetime(),
+  evidenceDigest: z.string().regex(/^[0-9a-f]{64}$/), signature: text,
+});
+// What harness:pbi-accept verified from the raw CI artifacts at APPROVE. It keeps the PBI DONE after the artifacts expire, and only while the
+// approved plan, the SBI composition and every PR, head and merge commit are still the same.
+const nullableSha = z.string().regex(/^[0-9a-f]{40,64}$/).nullable();
+export const pbiEvidenceManifestSchema = z.strictObject({
+  id: text, pbiUrl: z.url(), evidenceDigest: z.string().regex(/^[0-9a-f]{64}$/), recordedAt: z.iso.datetime(),
+  plan: z.strictObject({ digest: z.string().regex(/^[0-9a-f]{64}$/), revision: z.number().int().positive(), approvalKey: z.string().regex(/^[0-9a-f]{64}$/) }),
+  sbis: z.array(z.strictObject({
+    id: text, number: z.number().int().positive(), kind: z.enum(sbiKinds), pullRequest: z.number().int().positive().nullable(), headSha: nullableSha, mergeCommitSha: nullableSha,
+    requiredChecks: z.array(z.strictObject({ name: text, status: text })), e2e: z.strictObject({ status: text, api: z.enum(['mock', 'real']) }).nullable(),
+    lane: z.enum(['mock', 'real']).nullable(), resultDigest: z.string().regex(/^[0-9a-f]{64}$/).nullable(), workflowRunId: z.number().int().positive().nullable(), artifactId: z.number().int().positive().nullable(),
+  })).min(1),
+  signature: text,
+});
+
+const narrowPattern = text.refine(p => { try { return !new RegExp(p).test(''); } catch { return false; } }, 'pattern must not match empty text');
 export const securityPolicySchema = z.strictObject({
   version: z.literal(1), alwaysRequiredVerifiers: z.array(text).min(1),
   rules: z.array(z.strictObject({
     id: text.regex(/^SEC-[A-Z]+-\d+$/), description: text, categories: z.array(text).min(1),
     pathPatterns: z.array(text), contentPatterns: z.array(text), metadataPatterns: z.array(text),
-    preImplementationGate: z.literal(true), minimumRiskLevel: z.literal(3),
-    requiredHumanApprovals: z.number().int().min(2), requiredVerifiers: z.array(text).min(1), policyDocument: relativePath,
+    // A pattern that matches empty text would exempt every path or erase every content, so it is rejected.
+    // ignoreCase is set per exception; one that leaves it out ignores its strings only in the case it names, so it never widens by default.
+    contentExceptions: z.array(z.strictObject({ pathPatterns: z.array(narrowPattern).min(1), ignoredPatterns: z.array(narrowPattern).min(1), ignoreCase: z.boolean().optional() })).optional(),
+    ignoreLegacySbiMetadata: z.literal(true).optional(),
+    // Phrases of the SBI text that only negate the rule (an endpoint that needs no authentication) are dropped before metadataPatterns (#233).
+    ignoredMetadataPatterns: z.array(narrowPattern).optional(),
+    // A match in the SBI text alone requires every verifier of the rule whatever the changed paths, so no approval stands in for them (#165).
+    metadataRequiresAllVerifiers: z.literal(true).optional(),
+    // A changed path under these patterns that none of the rule's verifiers covers requires them all, failing closed (#246 N2).
+    uncoveredPathsRequireAllVerifiers: z.array(narrowPattern).optional(),
+    // A new OpenAPI operation the approved SBI declares public drops only these patterns from the contract's changed lines (#243).
+    publicOperationException: z.strictObject({ ignoredPatterns: z.array(narrowPattern).min(1) }).optional(),
+    // Only the added lines of a file under pathPatterns count, so a change that turns a setting dangerous matches and one that narrows it does not.
+    // ignoredPatterns drop safe forms (an egress block) first; a binary file there cannot be read and matches (#157).
+    addedContent: z.strictObject({ pathPatterns: z.array(narrowPattern).min(1), patterns: z.array(narrowPattern).min(1), ignoredPatterns: z.array(narrowPattern).default([]),
+      // A removed line that kept a protection on (prevent_destroy = true) turns it off as surely as an added line that sets it false.
+      removedPatterns: z.array(narrowPattern).default([]) }).optional(),
+    // A rule carries the Human Gate and two reviews only when its impact is severe; an ordinary one asks for a single review (#157).
+    preImplementationGate: z.boolean(), minimumRiskLevel: z.union([z.literal(2), z.literal(3)]),
+    requiredHumanApprovals: z.number().int().min(1), requiredVerifiers: z.array(text).min(1), policyDocument: relativePath,
   })).min(1),
   verifiers: z.array(z.strictObject({ id: text, kind: z.enum(['secret', 'forbidden', 'pii-log', 'command']),
-    directory: z.union([z.literal('.'), relativePath]).optional(), commands: z.array(z.array(text).min(1)).optional() })),
+    directory: z.union([z.literal('.'), relativePath]).optional(), commands: z.array(z.array(text).min(1)).optional(),
+    appliesTo: z.array(text).optional() })),
   secretPatterns: z.array(text).min(1), forbiddenPatterns: z.array(text), piiLogPatterns: z.array(text),
+  // #184: a test fixture that must spell out a pattern the content checks detect is named here, file by file, with the strings and the reason.
+  contentScanExceptions: z.array(z.strictObject({ path: relativePath, verifiers: z.array(text).min(1), ignoredPatterns: z.array(narrowPattern).min(1), reason: text })).optional(),
 }).refine(p => new Set(p.rules.map(r => r.id)).size === p.rules.length && new Set(p.verifiers.map(v => v.id)).size === p.verifiers.length, 'duplicate security rule/verifier');
-export const humanGatesSchema = z.strictObject({ version: z.literal(1), preImplementationRuleIds: z.array(text).min(1) });
+// preImplementationRuleIds keeps its name so that rule IDs stay matched with security.json and docs; since #175 it lists the rules a human
+// decides at SBI approval, not a gate before implementation.
+export const humanGatesSchema = z.strictObject({ version: z.literal(1), description: text.optional(), preImplementationRuleIds: z.array(text).min(1) });
 
 export const lanePolicySchema = z.strictObject({
   version: z.literal(1), prototypePaths: z.array(text).min(1), productionPaths: z.array(text).min(1),
@@ -115,3 +288,51 @@ export const lanePolicySchema = z.strictObject({
   prototypeGates: z.tuple([z.literal('typecheck'),z.literal('lint'),z.literal('format'),z.literal('build'),z.literal('secret-scan')]),
   productionGates: z.array(text).min(1),
 });
+// ADR-0006: only these rules can prove a Production file engineering; a file no rule proves is ambiguous.
+export const changeTypeRulesSchema = z.strictObject({
+  version: z.literal(1),
+  engineering: z.array(z.strictObject({ id: text, pattern: text, exclude: z.array(text).optional(), content: z.enum(['package-json-dependency-versions', 'gemfile-versions']).optional() })).min(1),
+}).refine(p => new Set(p.engineering.map(r => r.id)).size === p.engineering.length, 'duplicate change type rule');
+// summary.json is the signed authority for resume and merge assessment. Nested evidence stays open; the fields judges read are typed.
+const gitSha = z.string().regex(/^[0-9a-f]{40,64}$/);
+const result = z.looseObject({ status: text }).nullable();
+export const runIterationSchema = z.strictObject({
+  iteration: z.number().int().positive(), agent: z.looseObject({ status: text }).nullable(), verification: z.looseObject({ status: text, checks: z.array(z.looseObject({ id: text, status: text })) }).nullable(),
+  security: result, securityVerification: z.looseObject({ status: text, requiredVerifiers: z.array(text) }).nullable(), gateApproved: z.boolean(),
+  review: result, semanticReview: z.looseObject({ enabled: z.boolean(), status: text }), completion: z.boolean(), headSha: gitSha.optional(), error: z.string().optional(),
+});
+export const runStateSchema = z.strictObject({
+  id: text, runDir: text, sbi: text, sbiPath: relativePath.nullable(), provider: z.enum(['fake', 'codex', 'claude']), fullVerification: z.boolean(),
+  // A run from an SBI Issue (harness:run SBI_URL) has no SBI file; its source is the Issue its snapshot came from.
+  sbiIssue: z.strictObject({ repo: text.regex(/^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/), number: z.number().int().positive(), url: z.url() }).optional(),
+  // harness:run opens the PR itself only for an SBI it was given and a provider other than fake.
+  publish: z.boolean(),
+  snapshotVerification: z.looseObject({ verified: z.boolean(), reasons: z.array(z.string()) }).optional(),
+  status: z.enum([...new Set(Object.values(states).flat())]), executionStatus: z.enum(states.execution), reason: z.string().nullable(),
+  consecutiveFailures: z.number().int().min(0), iterations: z.array(runIterationSchema),
+  events: z.array(z.strictObject({ status: text, phase: z.enum(['execution', 'implementation-gate', 'merge', 'pull-request']), detail: z.string(), at: text })),
+  baselineSha: gitSha, headSha: gitSha, workspaceDigest: sha256, inputsDigest: sha256,
+  gate: z.looseObject({ required: z.boolean(), state: z.enum(states.gate) }),
+  merge: z.looseObject({ state: z.enum(states.merge), autoMergeEligible: z.boolean(),
+    failure: z.strictObject({ code: z.enum(escalationCodes), retryable: z.boolean(), detail: z.string() }).optional() }),
+  lane: z.looseObject({ name: z.enum(['prototype', 'production']) }).optional(),
+  securityAssessment: z.looseObject({ matchedRules: z.array(text), requiredVerifiers: z.array(text) }).optional(),
+  // The security assessment of the execution, kept so that each merge assessment combines it with the snapshot view of that moment.
+  executionSecurityAssessment: z.looseObject({ matchedRules: z.array(text), requiredVerifiers: z.array(text) }).optional(),
+  riskPreflight: z.looseObject({ level: z.union([z.literal(1), z.literal(2), z.literal(3)]) }).optional(),
+  risk: z.looseObject({ level: z.union([z.literal(1), z.literal(2), z.literal(3)]) }).optional(),
+  escalation: z.strictObject({ code: z.enum(escalationCodes), detail: z.string(), decision: z.literal('NEEDS_HUMAN_DECISION').optional() }).optional(),
+  // A Human Gate risk the approved SBI declared (#175): level 3 and two humans after implementation, never a stop before it.
+  humanGateRisk: z.boolean().optional(),
+  // #147: Trusted Acceptance generated in the run from the approved spec; registrationSha is the commit that registered it.
+  acceptance: z.strictObject({ mode: z.literal('generated'), specDigest: sha256, registrationSha: gitSha }).optional(),
+  pullRequest: z.strictObject({ number: z.number().int().positive(), url: z.url(), branch: text, base: text, repository: text }).optional(),
+  // harness:reverify (ADR-0003): a run that verifies the code of an existing PR merged with the new main, without the implementation agent.
+  kind: z.literal('reverify').optional(),
+  reverify: z.strictObject({ parentRunId: runIdSchema, previousTestedSha: gitSha, sbiSnapshotDigest: sha256,
+    publish: z.enum(['PREPARED', 'VERIFIED', 'PUSHING', 'PUSHED', 'PR_UPDATED']), conflicts: z.array(text).optional(), gitVersion: text.optional(),
+    // The implementation run on this PC, when it exists: whether its signed state verified and tested the PR head the run started from.
+    parentRun: z.strictObject({ found: z.boolean(), verified: z.boolean().optional(), testedSha: gitSha.optional(), testedShaMatches: z.boolean().optional() }) }).optional(),
+  startedAt: text, executionFinishedAt: text.optional(), cleanedAt: text.optional(),
+}).refine(s => (s.sbiPath === null) === (s.sbiIssue !== undefined), 'a run has either sbiPath or sbiIssue')
+  .refine(s => (s.kind === 'reverify') === (s.reverify !== undefined) && (s.kind !== 'reverify' || (s.pullRequest !== undefined && s.sbiIssue !== undefined)), 'a reverify run has its parent, its SBI Issue and its pull request');

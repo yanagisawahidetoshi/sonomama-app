@@ -36,7 +36,7 @@ describe('Health metrics signal collection', () => {
       assert.equal(metrics.autoMergeEligible, false);
       assert.equal(metrics.cleaned, false);
       assert.deepEqual(metrics.iterations, { total: 2, failed: 1, done: true, limitReached: false, consecutiveFailure: false });
-      assert.deepEqual(metrics.verifiers.summary, { pass: 1, fail: 0, skip: 5, notConfigured: 0 });
+      assert.deepEqual(metrics.verifiers.summary, { pass: 1, fail: 0, skip: 14, notConfigured: 0 });
       assert.deepEqual(metrics.verifiers.checks.find(c => c.id === 'sample-bdd'), { id: 'sample-bdd', status: 'PASS', required: true });
       assert.equal(metrics.security.securitySensitive, false);
       assert.deepEqual(metrics.security.matchedRules, []);
@@ -44,10 +44,10 @@ describe('Health metrics signal collection', () => {
       assert.equal(metrics.security.preImplementationGateRequired, false);
       assert.equal(metrics.security.verification.pass, run.securityAssessment.requiredVerifiers.length);
       assert.equal(metrics.security.verification.notConfigured, 0);
-      assert.deepEqual(metrics.approvals.design, { required: false, state: 'NOT_REQUIRED' });
+      assert.equal(metrics.approvals.design, undefined);
       assert.deepEqual(metrics.approvals.implementationGate, { required: false, state: 'NOT_REQUIRED' });
       assert.deepEqual(metrics.approvals.merge, { required: 1, valid: 0, requestedChanges: false });
-      assert.deepEqual(metrics.review, { policyReview: 'PASS', semanticReview: { enabled: false, status: 'SKIP' }, humanReviewRequired: true });
+      assert.deepEqual(metrics.review, { policyReview: 'PASS', semanticReview: { enabled: true, status: 'PASS' }, humanReviewRequired: true });
       assert.equal(metrics.escalation, null);
     }));
     it('when one human approves and the run resumes then records MERGE_ALLOWED without reviewer identities', () => fixture(async root => {
@@ -99,49 +99,27 @@ describe('Health metrics signal collection', () => {
       assert.equal(metrics.executionStatus, 'DONE');
     }));
   });
-  describe('given a run that stops before implementation', () => {
-    it('when an implementation Human Gate is required then records the gate and preflight risk without escalation', () => fixture(async root => {
+  describe('given an approved SBI with a Human Gate risk', () => {
+    // #175: the SBI approval covered AuthN, so the metrics show no implementation gate and the run starts implementing at once.
+    it('when the run starts then records no implementation gate, the preflight risk and the reason it stopped later', () => fixture(async root => {
       await update(root, sbiPath, s => s.risks = ['AuthN']);
-      const run = await runHarness({ root, quiet: true, agent: async () => { throw new Error('must not run'); } });
-      assert.equal(run.status, 'WAITING_FOR_HUMAN_GATE');
+      const run = await runHarness({ root, quiet: true, agent: async () => ({ escalation: 'API契約とDesignが矛盾しています', files: [] }) });
       const metrics = await metricsOf(root, run);
-      assert.equal(metrics.executionStatus, 'PENDING');
-      assert.equal(metrics.mergeStatus, 'NOT_ASSESSED');
+      assert.equal(metrics.executionStatus, 'ESCALATED');
       assert.equal(metrics.riskLevel, 3);
       assert.equal(metrics.riskPhase, 'preflight');
-      assert.deepEqual(metrics.approvals.implementationGate, { required: true, state: 'WAITING_FOR_HUMAN_GATE' });
-      assert.deepEqual(metrics.approvals.design, { required: false, state: 'NOT_REQUIRED' });
-      assert.deepEqual(metrics.approvals.merge, { required: null, valid: null, requestedChanges: false });
-      assert.deepEqual(metrics.iterations, { total: 0, failed: 0, done: false, limitReached: false, consecutiveFailure: false });
-      assert.deepEqual(metrics.verifiers, { summary: { pass: 0, fail: 0, skip: 0, notConfigured: 0 }, checks: [] });
-      assert.equal(metrics.review.humanReviewRequired, null);
-      assert.equal(metrics.executionDurationMs, null);
-      assert.equal(metrics.escalation, null);
+      assert.deepEqual(metrics.approvals.implementationGate, { required: false, state: 'NOT_REQUIRED' });
+      assert.deepEqual(metrics.escalation, { code: 'AGENT_ESCALATION' });
+      assert.equal(metrics.iterations.total, 1);
     }));
-    it('when a gated run is approved and resumed then execution duration excludes the human wait', () => fixture(async root => {
-      await update(root, '.harness/config/harness.json', c => c.securityVerifiers = [{ id: 'rails-rls-test', directory: 'apps/api', commands: [[process.execPath, '-e', 'require("node:assert/strict").ok(true)']] }]);
-      await update(root, sbiPath, s => s.risks = ['RLS']);
-      const run = await runHarness({ root, quiet: true });
-      assert.equal(run.status, 'WAITING_FOR_HUMAN_GATE');
-      await new Promise(resolve => setTimeout(resolve, 20));
-      await recordDecision({ root, runId: run.id, purpose: 'implementation-gate', identityProvider: human('A') });
-      const resumed = await resumeRun({ root, runId: run.id, quiet: true });
-      assert.equal(resumed.executionStatus, 'DONE');
-      const metrics = await metricsOf(root, run);
-      const implementing = resumed.events.find(e => e.status === 'IMPLEMENTING');
-      assert.ok(Date.parse(implementing.at) - Date.parse(run.startedAt) >= 20);
-      assert.ok(metrics.executionDurationMs < Date.parse(resumed.events.filter(e => e.phase === 'execution').at(-1).at) - Date.parse(run.startedAt));
-      assert.ok(metrics.executionDurationMs < metrics.durationMs);
-    }));
-    it('when Design Approval is required then records it separately from the implementation gate', () => fixture(async root => {
+    it('when a prototype is promoted then the metrics have no Design Approval and the run reaches merge review', () => fixture(async root => {
       const { agent } = await prototype(root, { promotion: true });
       const run = await runHarness({ root, quiet: true, agent });
-      assert.equal(run.status, 'WAITING_FOR_DESIGN_APPROVAL');
       const metrics = await metricsOf(root, run);
       assert.equal(metrics.lane, 'production');
-      assert.deepEqual(metrics.approvals.design, { required: true, state: 'WAITING_FOR_DESIGN_APPROVAL' });
+      assert.equal(metrics.approvals.design, undefined);
       assert.deepEqual(metrics.approvals.implementationGate, { required: false, state: 'NOT_REQUIRED' });
-      assert.equal(metrics.mergeStatus, 'NOT_ASSESSED');
+      assert.equal(metrics.mergeStatus, 'WAITING_FOR_HUMAN_REVIEW');
       assert.equal(metrics.escalation, null);
     }));
     it('when the SBI is ambiguous then records SPEC_AMBIGUOUS with no lane', () => fixture(async root => {
@@ -169,6 +147,7 @@ describe('Health metrics signal collection', () => {
     }));
     it('when a selected application verifier has no commands then records VERIFIER_NOT_CONFIGURED and counts it', () => fixture(async root => {
       await writeFile(join(root, 'apps/api/Gemfile'), '# Rails');
+      await update(root, '.harness/config/harness.json', c => { c.verifiers.find(v => v.id === 'rails').commands = []; });
       await update(root, sbiPath, s => s.allowedFiles = ['greeting.mjs', 'apps/api/note.txt']);
       const run = await runHarness({ root, quiet: true, agent: async () => ({ files: [{ path: 'greeting.mjs', content: 'export const greet = () => "wrong";' }, { path: 'apps/api/note.txt', content: 'note' }] }) });
       assert.equal(run.status, 'ESCALATED');
@@ -217,7 +196,7 @@ describe('Health metrics signal collection', () => {
       assert.equal(metrics.executionDurationMs, null);
       assert.equal(metrics.riskLevel, null);
       assert.equal(metrics.riskPhase, null);
-      assert.deepEqual(metrics.approvals.design, { required: false, state: 'NOT_REQUIRED' });
+      assert.equal(metrics.approvals.design, undefined);
       assert.deepEqual(metrics.security, { securitySensitive: null, matchedRules: [], requiredVerifierCount: null, preImplementationGateRequired: null, verification: { pass: 0, fail: 0, skip: 0, notConfigured: 0 } });
       assert.equal(metrics.escalation, null);
     });
@@ -231,6 +210,7 @@ describe('Health metrics signal collection', () => {
       ['Verifier mutated the source snapshot', 'WORKSPACE_CHANGED'], ['workspace is not an owned Git worktree', 'WORKSPACE_CHANGED'],
       ['Source must be clean; uncommitted inputs or source HEAD changed', 'SOURCE_CHANGED'], ['input snapshot changed', 'SOURCE_CHANGED'],
       ['config snapshot changed; start a new run', 'SOURCE_CHANGED'], ['trusted tool/skill snapshot changed', 'SOURCE_CHANGED'],
+      ['claude: timeout', 'PROVIDER_TIMEOUT'], ['codex: timeout', 'PROVIDER_TIMEOUT'], ['Agent/runtime error: claude: timeout', 'PROVIDER_TIMEOUT'],
       ['something nobody anticipated', 'UNKNOWN'],
     ];
     for (const [message, code] of cases) it(`when the message is "${message}" then classifies as ${code}`, () => assert.equal(classifyEscalation(message), code));

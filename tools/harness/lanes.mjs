@@ -1,5 +1,9 @@
 import defaults from '../../.harness/config/lanes.json' with { type: 'json' };
 import { lanePolicySchema } from './schemas.mjs';
+// apps/** and packages/** are always Production, whatever lanes.json lists in addition.
+export function isProductionPath(path, rawPolicy = defaults) {
+  return /^(apps|packages)\//.test(path) || lanePolicySchema.parse(rawPolicy).productionPaths.some(p => new RegExp(p).test(path));
+}
 // Unknown and mixed paths fail closed to production. No actor-provided lane override.
 export function classifyLane(files, sbi, rawPolicy = defaults) {
   const policy = lanePolicySchema.parse(rawPolicy);
@@ -11,6 +15,6 @@ export function classifyLane(files, sbi, rawPolicy = defaults) {
   const promoted = Boolean(sbi.promotion);
   return { name: prototype && !sensitive && !promoted ? 'prototype' : 'production',
     qualityGates: prototype && !sensitive && !promoted ? policy.prototypeGates : policy.productionGates,
-    requiresSecurityGate:sensitive, requiresDesignApproval:promoted, designApproved:false,
+    requiresSecurityGate:sensitive,
     reasons:[prototype ? 'prototype-paths' : 'production-or-unknown-paths', ...(sensitive?['security-sensitive-scope']:[]),...(promoted?['prototype-promotion']:[])] };
 }
