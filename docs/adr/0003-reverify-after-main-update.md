@@ -8,7 +8,7 @@
 - 関連SBI: なし
 - 関連Design Docs: [.ai/workflows/pull-request.md](../../.ai/workflows/pull-request.md)
 - Supersedes: なし（[ADR-0001](0001-github-review-merge-approval.md)の「runを作り直す」を読み替える）
-- Superseded by: [ADR-0011](0011-no-main-sync-without-conflict.md)（Proposed）が、mainが進んだだけでBLOCKEDにする部分を置き換える
+- Superseded by: [ADR-0011](0011-no-main-sync-without-conflict.md)が、mainが進んだだけでBLOCKEDにする部分を置き換える
 
 状態の意味とAIの扱いは[README](README.md)を参照する。
 
