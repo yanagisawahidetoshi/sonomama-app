@@ -1,6 +1,6 @@
 # mainのGitHub Ruleset
 
-mainへの変更は、PRを通し、CIの`harness`チェックが成功したものだけにする。GitHubのRulesetでこれを強制し、ローカルのpre-push hookを外したpushや、CIが落ちたPRのmergeを止める。
+mainへの変更は、PRを通し、`Completion Judge`チェックが成功したものだけにする。GitHubのRulesetでこれを強制し、ローカルのpre-push hookを外したpushや、CIが落ちたPRのmergeを止める。
 変更のリスクに応じたレビュー人数はHarnessが判定するので、GitHub側では人数を要求しない。
 設定内容は[.github/rulesets/main.json](../../.github/rulesets/main.json)にあり、リポジトリの管理者が下の手順で適用する。HarnessもAIエージェントもGitHubの設定は変更しない。
 
@@ -9,13 +9,13 @@ mainへの変更は、PRを通し、CIの`harness`チェックが成功したも
 | 判定すること | 受け持つ側 |
 | --- | --- |
 | mainへの直接push、force push、mainの削除を止める | GitHub Ruleset |
-| `harness`チェックが成功していないPRのmergeを止める | GitHub Ruleset |
-| `harness`チェックの中身（変更範囲に応じた検証、Trusted Acceptance、Completion Judge） | CI上のHarness（[.ai/workflows/ci.md](../../.ai/workflows/ci.md)） |
+| `Completion Judge`チェックが成功していないPRのmergeを止める | GitHub Ruleset |
+| `Completion Judge`チェックの中身（変更範囲に応じた検証、Trusted Acceptance、Completion Judge） | CI上のHarness（[.ai/workflows/ci.md](../../.ai/workflows/ci.md)） |
 | リスクのレベル（1〜3）と、必要なレビュー人数（0人、1人、別々の2人以上） | Harness |
 | 検証したcommitとPRの先頭が一致しているか、mainが進んでいないか、修正依頼が残っていないか | Harness（`pnpm harness:resume`） |
 | 実際のmerge | 人 |
 
-GitHubはHarnessのMERGE_ALLOWEDを参照しない。Rulesetで止められるのは「PRを通していない」「`harness`が成功していない」の2つだけで、レビュー人数が足りないPRでもGitHub上ではmergeできる。mergeする人は、`pnpm harness:resume --run RUN_ID`でMERGE_ALLOWEDを確かめてからmergeする。Harnessの判定条件は[.ai/workflows/pull-request.md](../../.ai/workflows/pull-request.md)にある。
+GitHubはHarnessのMERGE_ALLOWEDを参照しない。Rulesetで止められるのは「PRを通していない」「`Completion Judge`が成功していない」の2つだけで、レビュー人数が足りないPRでもGitHub上ではmergeできる。mergeする人は、`pnpm harness:resume --run RUN_ID`でMERGE_ALLOWEDを確かめてからmergeする。Harnessの判定条件は[.ai/workflows/pull-request.md](../../.ai/workflows/pull-request.md)にある。
 
 ## 設定の内容
 
@@ -29,7 +29,7 @@ GitHubはHarnessのMERGE_ALLOWEDを参照しない。Rulesetで止められる�
 | strict_required_status_checks_policy | 無効 | mainが進んだだけでPRへのmain取り込みとCIの再実行を求めない（#288）。conflictが出たときだけ取り込む。merge後のmainへのpushで全量を検証する。Harness runは、mainの先頭がrunのbaselineと一致することを自分で確かめる |
 | bypass_actors | なし | 管理者も含めて例外を作らない。緊急時の扱いは下に書く |
 
-`harness`は`.github/workflows/harness.yml`のjob idで、GitHubのcheck名もこの名前になる。job idを変えると、Rulesetの必須チェックと一致しなくなり、どのPRもmergeできなくなる。`integration_id`を指定しているので、GitHub Actions以外のGitHub Appが同じ名前のcheckを報告しても、必須チェックを満たしたことにはならない。Harnessも、Rulesetの必須チェックと`integration_id`を読んで判定に加える。
+`Completion Judge`は`.github/workflows/completion-judge.yml`の`publish` jobが作るcheck runの名前。この名前を変えると、Rulesetの必須チェックと一致しなくなり、どのPRもmergeできなくなる。`integration_id`を指定しているので、GitHub Actions以外のGitHub Appが同じ名前のcheckを報告しても、必須チェックを満たしたことにはならない。Harnessも、Rulesetの必須チェックと`integration_id`を読んで判定に加える。
 
 ## レビュー人数をGitHubに設定しない理由
 
@@ -65,7 +65,7 @@ privateリポジトリでRulesetを使うには、GitHub Pro以上のプラン�
 
 ## 適用を確認する
 
-1. mainに効いているルールを読む。`deletion`、`non_fast_forward`、`pull_request`、`required_status_checks`の4つが出て、必須チェックが`harness`（`integration_id`は15368）であることを確かめる。
+1. mainに効いているルールを読む。`deletion`、`non_fast_forward`、`pull_request`、`required_status_checks`の4つが出て、必須チェックが`Completion Judge`（`integration_id`は15368）であることを確かめる。
 
    ```sh
    gh api repos/yanagisawahidetoshi/sonomama-harness/rules/branches/main --jq '.[] | {type, parameters}'
@@ -81,10 +81,10 @@ privateリポジトリでRulesetを使うには、GitHub Pro以上のプラン�
    git worktree remove ../ruleset-check
    ```
 
-3. CIが終わる前のPRをmergeできないことを確かめる。PRを作った直後、`harness`が実行中の間は`BLOCKED`になる。
+3. CIが終わる前のPRをmergeできないことを確かめる。PRを作った直後、`Completion Judge`が出るまでの間は`BLOCKED`になる。
 
    ```sh
    gh pr view PR_NUMBER --json mergeStateStatus
    ```
 
-4. GitHub PR modeのrunで`pnpm harness:resume --run RUN_ID`を実行し、`.harness/runs/<run-id>/github-state.json`の`ci.requiredChecks`に、`harness`（`integrationId: null`）と`harness`（`integrationId: 15368`）の2つが入っていることを確かめる。前者は`harness.json`の`github.requiredChecks`、後者はRulesetから読んだもの。どちらも同じcheck runで満たされるので、CIが成功していれば判定は変わらない。
+4. GitHub PR modeのrunで`pnpm harness:resume --run RUN_ID`を実行し、`.harness/runs/<run-id>/github-state.json`の`ci.requiredChecks`に、`harness`（`integrationId: null`）と`Completion Judge`（`integrationId: 15368`）の2つが入っていることを確かめる。前者は`harness.json`の`github.requiredChecks`、後者はRulesetから読んだもの。
