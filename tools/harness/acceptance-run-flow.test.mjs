@@ -103,6 +103,22 @@ describe('A run from a spec-approved SBI Issue', () => {
     assert.equal(result.executionStatus, 'ESCALATED');
     assert.equal(result.escalation?.code, 'SPEC_AMBIGUOUS');
   })));
+  it('when the generation provider times out then the run escalates as PROVIDER_TIMEOUT and is not left PENDING', () => fixture(root => mockGitHub({}, async () => {
+    await prepared(root);
+    let implemented = false;
+    const result = await run(root, { acceptanceAgent: async () => { throw new Error('claude: timeout'); }, acceptanceRunner: runner().run, agent: async () => { implemented = true; return implementation(); } });
+    assert.equal(result.executionStatus, 'ESCALATED');
+    assert.equal(result.escalation?.code, 'PROVIDER_TIMEOUT');
+    assert.equal((await readJson(join(root, result.runDir, 'summary.json'))).status, 'ESCALATED');
+    assert.equal(implemented, false);
+  })));
+  it('when the violation provider times out then the run escalates as PROVIDER_TIMEOUT and is not left PENDING', () => fixture(root => mockGitHub({}, async () => {
+    await prepared(root);
+    const result = await run(root, { acceptanceRunner: runner({ before: 'passed' }).run, violationAgent: async () => { throw new Error('claude: timeout'); } });
+    assert.equal(result.executionStatus, 'ESCALATED');
+    assert.equal(result.escalation?.code, 'PROVIDER_TIMEOUT');
+    assert.equal((await readJson(join(root, result.runDir, 'summary.json'))).status, 'ESCALATED');
+  })));
   // The specs could not run at all (no RSpec report): an environment failure says nothing about the tests, so it is not retried as one.
   it('when the specs cannot run because of the environment then the run stops as a run failure before implementing, without regenerating', () => fixture(root => mockGitHub({}, async () => {
     await prepared(root);
