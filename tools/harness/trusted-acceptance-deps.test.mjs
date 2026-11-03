@@ -33,6 +33,7 @@ async function trees(fn) {
 const judge = ({ root, workspace }) => verify({ root, workspace, sbi: { id: 'SBI-T', acceptanceCriteria: [{ id: 'AC-1', verifier: 'trusted-check' }], requiredVerifiers: [] }, files: [],
   config: { timeoutMs: 10000, verifiers: [{ id: 'trusted-check', trust: 'acceptance', trustedScript: '.harness/verification/check.mjs', acceptanceIds: ['AC-1'] }], securityVerifiers: [] } });
 const status = result => result.checks.find(c => c.id === 'trusted-check')?.status;
+const stderr = result => result.checks.find(c => c.id === 'trusted-check')?.process?.stderr ?? '';
 
 describe('Dependencies of a Trusted Acceptance run against a PR tree', () => {
   describe('given a PR tree without node_modules and a trusted installation that has the package', () => {
@@ -50,14 +51,19 @@ describe('Dependencies of a Trusted Acceptance run against a PR tree', () => {
     it('when only the PR tree has the package then the run fails instead of falling back to the PR copy', () => trees(async t => {
       await mkdir(join(t.root, 'node_modules'), { recursive: true });
       await pkg(t.workspace, 'harness-dep', 'pr');
-      assert.equal(status(await judge(t)), 'FAIL');
+      const result = await judge(t);
+      assert.equal(status(result), 'FAIL');
+      assert.doesNotMatch(stderr(result), /resolved from pr/);
+      assert.match(stderr(result), /ERR_MODULE_NOT_FOUND|not in the trusted installation/);
     }));
   });
   describe('given a package found only above the trusted root', () => {
     it('when Node would walk up past the trusted installation then the run fails instead of loading it', () => trees(async t => {
       await mkdir(join(t.root, 'node_modules'), { recursive: true });
       await pkg(join(t.root, '..'), 'harness-dep', 'trusted');
-      assert.equal(status(await judge(t)), 'FAIL');
+      const result = await judge(t);
+      assert.equal(status(result), 'FAIL');
+      assert.match(stderr(result), /ERR_ACCESS_DENIED|ERR_MODULE_NOT_FOUND|not in the trusted installation/);
     }));
   });
   describe('given a trusted root without node_modules', () => {

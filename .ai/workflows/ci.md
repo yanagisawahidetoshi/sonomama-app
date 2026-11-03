@@ -17,7 +17,7 @@
 
 | job | 内容 |
 | --- | --- |
-| `judge` | mainをcheckoutし、PRのheadをcheckoutの外（`runner.temp/pr`）にdetached worktreeで置く。PRのものはinstallも実行もしない。`pnpm harness:judge --trusted`が、同じhead SHAの`pull_request` runが終わるまで待つ。impactをmainのコードで計算し直し、そのrunのjobs APIとartifactで判定する。secretも書き込み権限も持たない |
+| `judge` | mainをcheckoutし、PRのheadをcheckoutの外（`runner.temp/pr`）にdetached worktreeで置く。PRのものはinstallも実行もしない。Trusted AcceptanceがPRのコードをimportするときのbare importは、mainの`node_modules`からだけ解決する（PR側や上位ディレクトリへのfallbackなし、#295）。`pnpm harness:judge --trusted`が、同じhead SHAの`pull_request` runが終わるまで待つ。impactをmainのコードで計算し直し、そのrunのjobs APIとartifactで判定する。secretも書き込み権限も持たない |
 | `publish` | `checks: write`の`GITHUB_TOKEN`で、`judge`の結果をcheck runにする。checkoutもHarnessの実行もしない。`judge`が失敗・取消・skip・結果なしなら`failure`を出す |
 
 | 判定 | check run | 意味 |
