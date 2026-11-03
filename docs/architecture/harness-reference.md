@@ -2,6 +2,31 @@
 
 [README](../../README.md)から移した詳細仕様。
 
+## 実行
+
+Node.js 22以上、pnpm 8以上、Git 2.28以上が必要。レビューZIPの作成にはzip、テストにはunzipも使用する。
+
+```sh
+pnpm install --frozen-lockfile
+pnpm harness:check
+pnpm harness:test
+pnpm harness:demo
+```
+
+fakeは認証・外部通信なしで、次の流れを実行する。
+
+```text
+SBI → 意図的な誤実装 → Verifier FAIL
+    → 修正 → Verifier PASS → Security PASS → Policy Review PASS
+    → Semantic Review（有効時のみ）→ Completion Judge → Execution DONE
+    → Risk Classifier: LEVEL 2 → WAITING_FOR_HUMAN_REVIEW
+```
+
+デモは実装完了とリスク判定まで確認してexit 0。通常のrun/resumeはMERGE_ALLOWEDでexit 0、
+承認待ち・停止はexit 2、入力やCLI操作のエラーはexit 1。
+**Execution DONEはマージ承認ではない。** このサンプルはruntime変更のため既定LEVEL 2。
+承認を自動生成せず、実際のmergeも行わない。
+
 ## 構成
 
 | 場所 | 役割 |

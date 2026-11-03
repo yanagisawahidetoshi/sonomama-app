@@ -14,4 +14,4 @@ Verifierは差分のappliesToとlaneで選び、AC・Security・明示必須指�
 Prototypeはprototypes/web・mobileのダミーデータ画面で、typecheck/lint/format/build/secret検査。
 Productionはapps・packages。試作から本番へ採用するときは新しいProduction SBIにpromotion.sourceを指定し、
 独立したDesign Approvalを得てからapps実装、本番検証、Merge Approvalへ進む。Security影響はlaneより常に優先。
-承認・cleanupのコマンドは[README](../../README.md)、詳しい設定例は[harness-reference.md](../architecture/harness-reference.md)に記載する。
+詳しい設定例と承認・cleanup手順は[harness-reference.md](../architecture/harness-reference.md)に記載する。
