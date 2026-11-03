@@ -1,10 +1,12 @@
 import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { exists, execute } from './io.mjs';
 import { classifyLane } from './lanes.mjs';
 import { runIsolated } from './isolation.mjs';
 import { generatedVerifierId, readAcceptance } from './acceptance-registry.mjs';
 import { verifyGeneratedRegistration } from './acceptance-generation.mjs';
 import { judgeAcceptance, runGeneratedAcceptance } from './acceptance-run.mjs';
+const trustedResolver = fileURLToPath(new URL('./trusted-resolve.mjs', import.meta.url));
 export function checksPassed(checks) {
   return Array.isArray(checks) && checks.length > 0 && checks.every(c => c.status === 'PASS'
     || (c.status === 'SKIP' && c.required === false && ['missing app (placeholder)', 'not applicable to this change'].includes(c.reason)));
@@ -67,7 +69,10 @@ export async function verify({ root, workspace, config, sbi, files = sbi.allowed
       if (!await exists(script)) { checks.push({...base,required:true,status:'NOT_CONFIGURED',reason:'trusted acceptance script missing'}); continue; }
       // Shared helpers come from the protected root, never from the agent workspace. Dependencies come from the trusted
       // Harness installation; the run workspace's node_modules lives only in verifier containers.
-      const process = await execute(globalThis.process.execPath, ['--experimental-permission', `--allow-fs-read=${workspace}`, `--allow-fs-read=${script}`, `--allow-fs-read=${join(root, '.harness/verification/lib')}`, `--allow-fs-read=${join(root, 'node_modules')}`, script, workspace], { cwd: workspace, timeoutMs: config.timeoutMs, env: {} });
+      // #295: bare imports of the code under test resolve from the trusted installation only (trusted-resolve.mjs), never from the PR tree.
+      const resolver = pathToFileURL(trustedResolver);
+      resolver.searchParams.set('root', root);
+      const process = await execute(globalThis.process.execPath, ['--experimental-permission', `--allow-fs-read=${workspace}`, `--allow-fs-read=${script}`, `--allow-fs-read=${join(root, '.harness/verification/lib')}`, `--allow-fs-read=${join(root, 'node_modules')}`, `--allow-fs-read=${trustedResolver}`, '--import', resolver.href, script, workspace], { cwd: workspace, timeoutMs: config.timeoutMs, env: {} });
       const check = { ...base, required:true, status:process.ok?'PASS':'FAIL', cwd:workspace, process };
       if (process.ok) {
         try {
