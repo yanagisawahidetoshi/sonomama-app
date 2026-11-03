@@ -18,6 +18,7 @@ import { postSpecApproval } from './spec-approval.mjs';
 import { githubCli } from './planner-github.mjs';
 import { git } from './workspace.mjs';
 import { appendFile } from 'node:fs/promises';
+import { availableParallelism } from 'node:os';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -184,10 +185,11 @@ try {
     // The refs describe this push only; hook tests inside harness:test must not inherit them.
     const { HARNESS_PUSH_REFS: refs = '', ...env } = process.env;
     const run = (command, args, cwd) => spawnSync(command, args, { cwd, stdio: 'inherit', env }).status === 0;
-    // The selected tests run in the detached worktree of the pushed commit, which starts without node_modules; same concurrency as harness:test.
+    // The selected tests run in the detached worktree of the pushed commit, which starts without node_modules. Nothing else runs during a push,
+    // so they take half the cores (at least the 3 of harness:test): the selected test files took 400 s at 3 and 293 s at 6 on 12 cores.
     const result = await runPushGate({ root, refs, log: line => console.log(redactText(line)),
       install: workspace => run('pnpm', ['install', '--frozen-lockfile', '--prefer-offline'], workspace),
-      runTests: (workspace, tests) => run(process.execPath, ['--test', `--test-concurrency=${env.HARNESS_TEST_CONCURRENCY || 3}`, ...tests], workspace) });
+      runTests: (workspace, tests) => run(process.execPath, ['--test', `--test-concurrency=${env.HARNESS_TEST_CONCURRENCY || Math.max(3, Math.floor(availableParallelism() / 2))}`, ...tests], workspace) });
     process.exitCode = result.passed ? 0 : 1;
   } else if (command === 'pr') {
     if (!options['--run']) throw new Error('pr requires --run ID');
