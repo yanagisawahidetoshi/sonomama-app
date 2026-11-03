@@ -17,6 +17,7 @@ import { isGeneratedRegistrationPath } from './acceptance-generation.mjs';
 import { judgeAcceptance, readAcceptanceResult, runGeneratedAcceptance, writeAcceptanceResult } from './acceptance-run.mjs';
 import { specDigest } from './spec-approval.mjs';
 import { changedFiles as diffFiles, git } from './workspace.mjs';
+import { classifyHarnessChange, selectHarnessTests } from './harness-tests.mjs';
 // SBI Impact Analysis for CI scheduling. harness.json stays the single definition of verifiers; this only decides which of them a change needs.
 const sorted = values => [...new Set(values)].sort();
 const applicationVerifiers = config => config.verifiers.filter(v => (v.trust || 'application') === 'application');
@@ -68,8 +69,9 @@ export function analyzeImpact({ config, sbis = [], runSbis = [], files = [], all
       for (const id of rule.add) select(id, `cross-layer:${[...rule.all, ...hit].join('+')}`, false);
     }
   }
-  const fullGatePath = firstMatch(config.impact?.fullGate, files);
-  const fullGateReasons = all ? ['all'] : [...fullGatePath ? [`diff:${fullGatePath}`] : [], ...toolchainPath ? [`toolchain:${toolchainPath}`] : []];
+  // #288: a Harness module change runs the tests that name it (loadImpact selects them); the Full Gate is for what no import can scope.
+  const harness = classifyHarnessChange({ config, files });
+  const fullGateReasons = all ? ['all'] : harness.reasons;
   // ADR-0006: a Production diff needs an SBI unless every Production file is proven engineering. Prototypes, docs and Harness maintenance
   // stay outside lanes.json productionPaths and get no change type.
   const { changeType, requiresSbi, engineering, ambiguous } = classifyChangeType(files);
@@ -83,6 +85,7 @@ export function analyzeImpact({ config, sbis = [], runSbis = [], files = [], all
     acceptanceVerifiers: sorted(sbis.flatMap(s => s.acceptanceCriteria.map(a => a.verifier))),
     fullGate: fullGateReasons.length > 0,
     fullGateReasons,
+    harnessModules: harness.modules,
     // Maestro runs only for mobile SBIs that ask for E2E (#68), never for every mobile PR. Only a Run snapshot (from an approved SBI Issue)
     // picks a lane; hand-written SBI JSON has no provenance and must not add a required job.
     maestro: maestroLanes(runSbis),
@@ -107,7 +110,7 @@ export function judgeCi({ impact, needs, acceptance, security, source, granulari
   reasons.push(...(granularity ?? []).filter(g => g.status === 'FAIL').map(g => g.reason));
   if (migrationExceptions?.status === 'FAIL') reasons.push(...migrationExceptions.reasons);
   expect('verifiers', impact.requiredVerifiers.length > 0);
-  expect('harness-test', impact.fullGate);
+  expect('harness-test', impact.fullGate || impact.harnessTests?.length > 0);
   expect('harness-demo', impact.fullGate);
   // The maestro job and its result files; judgeMaestro adds nothing when no lane is required.
   const lanes = impact.maestro ?? [];
@@ -172,7 +175,9 @@ export async function loadImpact({ root, workspace = root, base, all = false }) 
   // Only connected command verifiers go to the matrix; an unconnected one stays NOT_CONFIGURED in the judge and fails there.
   const connected = new Set(config.securityVerifiers.filter(v => v.commands.length).map(v => v.id));
   const securityVerifiers = assessSecurity({ files, sbis, snapshots, policy }).requiredVerifiers.filter(id => connected.has(id));
-  return { config, files, sbis, snapshots, impact: analyzeImpact({ config, sbis, runSbis: snapshots.map(s => s.snapshot.sbi), files, all, securityVerifiers }) };
+  const impact = analyzeImpact({ config, sbis, runSbis: snapshots.map(s => s.snapshot.sbi), files, all, securityVerifiers });
+  impact.harnessTests = impact.fullGate ? [] : (await selectHarnessTests({ root: workspace, config, files })).tests;
+  return { config, files, sbis, snapshots, impact };
 }
 
 // The matrix job: one verifier, mandatory only when an SBI asked for it, so a cross-layer contract without a document stays a placeholder SKIP.
@@ -318,6 +323,7 @@ export function describeImpact(impact) {
     ...impact.verifiers.map(v => `Verifier ${v.id}${v.mandatory ? ' [mandatory]' : ''}: ${v.reasons.join(', ')}`),
     `Acceptance (Completion Judge): ${impact.acceptanceVerifiers.join(', ') || '(none)'}`,
     `Full Gate: ${impact.fullGate ? `yes (${impact.fullGateReasons.join(', ')})` : 'no'}`,
+    ...(impact.harnessTests?.length ? [`Harness tests: ${impact.harnessTests.join(' ')}`] : []),
     `Maestro: ${impact.maestro?.length ? impact.maestro.join(', ') : 'not required'}`,
   ];
 }

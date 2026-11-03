@@ -131,8 +131,10 @@ describe('SBI Impact Analysis', () => {
       assert.equal(analyzeImpact({ config, sbis: [], files: files('tools/harness/verifier.mjs', '.harness/config/harness.json') }).fullGate, true);
     });
     it('when a module changes on a pull request then the impact names the tests that import it', () => fixture(async root => {
+      // Joined, not a literal: a literal module path in this file would make this test select itself.
+      const module = `${['tools/harness', 'push-gate'].join('/')}.mjs`;
       await git(root, ['switch', '--quiet', '-c', 'feature']);
-      await writeFile(join(root, 'tools/harness/push-gate.mjs'), `${await readFile(join(root, 'tools/harness/push-gate.mjs'), 'utf8')}\n`);
+      await writeFile(join(root, module), `${await readFile(join(root, module), 'utf8')}\n`);
       await git(root, ['commit', '--quiet', '-am', 'module']);
       const { impact } = await loadImpact({ root, base: 'main' });
       assert.equal(impact.fullGate, false);

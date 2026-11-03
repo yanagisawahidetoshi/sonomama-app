@@ -10,7 +10,7 @@ const named = /['"`]([^'"`\s]+\.mjs)['"`]/g;
 // The directories harness:test runs, read from its script so the two never drift apart.
 async function testFiles(root) {
   const script = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).scripts['harness:test'];
-  const dirs = [...script.matchAll(/(\S+)\/\*\.test\.mjs/g)].map(m => m[1]);
+  const dirs = [...script.matchAll(/([\w.][\w.\/-]*)\/\*\.test\.mjs/g)].map(m => m[1]);
   const lists = await Promise.all(dirs.map(async dir => (await readdir(join(root, dir)).catch(() => [])).filter(f => f.endsWith('.test.mjs')).map(f => `${dir}/${f}`)));
   return lists.flat();
 }
