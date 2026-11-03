@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execute } from './io.mjs';
@@ -38,6 +38,19 @@ describe('A provider process that outlives its time limit (#277)', () => {
     await new Promise(r => setTimeout(r, 200));
     assert.equal(alive(helper), false, `helper ${helper} is still running`);
   }));
+  it('given a ps that never answers when the limit passes then execute still returns within a few seconds as timed out', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'harness-slow-ps-'));
+    const path = process.env.PATH;
+    try {
+      await writeFile(join(dir, 'ps'), '#!/bin/sh\nexec sleep 30\n');
+      await chmod(join(dir, 'ps'), 0o755);
+      process.env.PATH = `${dir}:${path}`;
+      const started = Date.now();
+      const result = await execute(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { timeoutMs: 500 });
+      assert.equal(result.timedOut, true);
+      assert.ok(Date.now() - started < 10000, `returned after ${Date.now() - started}ms`);
+    } finally { process.env.PATH = path; await rm(dir, { recursive: true, force: true }); }
+  });
   it('given a provider that finishes in time when it exits then execute still waits for its whole output', async () => {
     const result = await execute(process.execPath, ['-e', 'process.stdout.write("x".repeat(200000))'], { timeoutMs: 10000 });
     assert.equal(result.ok, true);
