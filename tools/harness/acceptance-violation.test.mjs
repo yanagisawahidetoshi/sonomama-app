@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { inspectViolation, judgeViolation, violationLimits, violationPrompt, violationResponseSchema } from './acceptance-violation.mjs';
+import { violationContext, inspectViolation, judgeViolation, violationLimits, violationPrompt, violationResponseSchema } from './acceptance-violation.mjs';
 
 // #147: controlled violation. For a Scenario that already passes before the implementation, the generation agent proposes a minimal change
 // to the application that must make that Scenario's expected outcome fail. The Harness accepts or rejects the proposal mechanically.
@@ -140,5 +140,23 @@ describe('The prompt handed to the violation agent', () => {
     const prompt = violationPrompt({ sbiIssue: 7, scenarios: [{ scenario: '担当講師が閲覧する', acceptanceIds: ['AC-1'], examples: ['200を返す'] }] });
     const rule = prompt.split('\n').find(line => line.includes('ローカル変数'));
     for (const name of ['token', 'secret', 'password', 'credential', 'authorization', 'api_key', 'access_key']) assert.match(rule ?? '', new RegExp(name));
+  });
+});
+
+describe('Controlled violation source context', () => {
+  describe('given existing application code and unsafe reference candidates', () => {
+    it('when context is collected then only tracked regular safe text under apps/api/app is supplied', () => workspace(async root => {
+      const { git } = await import('./workspace.mjs');
+      await writeFile(join(root, 'apps/api/app/controllers/private.rb'), '# ghp_' + 'z'.repeat(36));
+      await writeFile(join(root, 'apps/api/app/controllers/binary.rb'), 'a\0b');
+      await writeFile(join(root, 'apps/api/app/controllers/large.rb'), 'x'.repeat(65537));
+      await writeFile(join(root, 'apps/api/app/controllers/.env'), 'PRIVATE=value');
+      await writeFile(join(root, 'outside.rb'), 'outside source');
+      await symlink(join(root, 'outside.rb'), join(root, 'apps/api/app/controllers/link.rb'));
+      await git(root, ['init', '--template=']);
+      await git(root, ['add', '.']);
+      await writeFile(join(root, 'apps/api/app/controllers/untracked.rb'), 'untracked source');
+      assert.deepEqual(await violationContext(root), [{ path: controller, content: original }]);
+    }));
   });
 });
