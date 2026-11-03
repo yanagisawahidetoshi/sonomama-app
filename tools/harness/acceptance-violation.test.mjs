@@ -160,3 +160,20 @@ describe('Controlled violation source context', () => {
     }));
   });
 });
+
+// #283 review: secret paths must be rejected before their original contents reach the diff temporary files.
+describe('Secret paths in a controlled violation proposal', () => {
+  describe('given existing secret paths under apps/api/app', () => {
+    it('when a proposal names those paths then rejects them without counting changed lines or changing their contents', () => workspace(async root => {
+      for (const name of ['.env', 'credentials.yml', 'private.key']) {
+        const path = `apps/api/app/controllers/${name}`;
+        const content = 'MODE=before\n';
+        await writeFile(join(root, path), content);
+        const result = await inspectViolation({ workspace: root, proposal: proposal([{ path, content: 'MODE=after\n' }]) });
+        assert.ok(result.findings.some(f => f.path === path && /secret/i.test(f.message)), name);
+        assert.equal(result.changedLines, 0, name);
+        assert.equal(await readFile(join(root, path), 'utf8'), content);
+      }
+    }));
+  });
+});
