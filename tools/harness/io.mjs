@@ -12,8 +12,10 @@ export async function json(path, value) {
 }
 // The process and every descendant, found before any of them dies (a killed parent hands its children to init). A provider may start
 // helpers in their own session, so killing the process group alone can leave them running with our output pipes open (#277).
+const psTimeoutMs = 1000;
 function processTree(root) {
-  const listed = spawnSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' });
+  // ps gets a short limit too: if it fails or hangs, the process group kill and the close grace still end the wait.
+  const listed = spawnSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8', timeout: psTimeoutMs, killSignal: 'SIGKILL' });
   const children = new Map();
   for (const line of (listed.stdout ?? '').split('\n')) {
     const [pid, ppid] = line.trim().split(/\s+/).map(Number);
