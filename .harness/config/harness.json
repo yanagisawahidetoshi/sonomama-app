@@ -1209,5 +1209,66 @@
       "^pnpm-workspace\\.yaml$",
       "^\\.npmrc$"
     ]
+  },
+  "harnessTests": {
+    "integration": {
+      "tools/harness/github-pr.test.mjs": [
+        "tools/harness/github-pr.mjs",
+        "tools/harness/merge-policy.mjs",
+        "tools/harness/test-github.mjs"
+      ],
+      "tools/harness/reverify.test.mjs": [
+        "tools/harness/reverify.mjs",
+        "tools/harness/test-reverify.mjs"
+      ],
+      "tools/harness/reverify-repeat.test.mjs": [
+        "tools/harness/reverify.mjs",
+        "tools/harness/test-reverify.mjs"
+      ],
+      "tools/harness/reverify-conflict.test.mjs": [
+        "tools/harness/reverify.mjs",
+        "tools/harness/test-reverify.mjs"
+      ],
+      "tools/harness/approval-flow.test.mjs": [
+        "tools/harness/human-approvals.mjs",
+        "tools/harness/state-machine.mjs"
+      ],
+      "tools/harness/implementation-start.test.mjs": [
+        "tools/harness/ai-review.mjs",
+        "tools/harness/agents/ai-review-adapter.mjs"
+      ],
+      "tools/harness/acceptance-run-flow.test.mjs": [
+        "tools/harness/acceptance-run.mjs",
+        "tools/harness/acceptance-registry.mjs"
+      ],
+      "tools/harness/run-store.test.mjs": [
+        "tools/harness/run-store.mjs"
+      ],
+      "tools/harness/sbi-source.test.mjs": [
+        "tools/harness/sbi-source.mjs",
+        "tools/harness/sbi-issue.mjs"
+      ],
+      "tools/harness/quality-gates.test.mjs": [
+        "tools/harness/verifier.mjs",
+        "tools/harness/lanes.mjs",
+        "tools/harness/check.mjs"
+      ],
+      "tools/harness/harness.test.mjs": [
+        "tools/harness/index.mjs",
+        "tools/harness/cli.mjs",
+        "tools/harness/completion-judge.mjs"
+      ],
+      "tools/harness/health-metrics.test.mjs": [
+        "tools/harness/health-metrics.mjs",
+        "tools/harness/escalation.mjs"
+      ],
+      "tools/harness/impact.test.mjs": [
+        "tools/harness/impact.mjs",
+        "tools/harness/harness-tests.mjs"
+      ],
+      "tools/harness/lanes.test.mjs": [
+        "tools/harness/lanes.mjs"
+      ]
+    }
   }
 }

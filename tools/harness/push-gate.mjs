@@ -5,8 +5,8 @@ import { readJson } from './io.mjs';
 import { classifyHarnessChange, selectHarnessTests } from './harness-tests.mjs';
 import { configSchema } from './schemas.mjs';
 import { git } from './workspace.mjs';
-// pre-push scope (#288): fast feedback only. It runs the Harness tests that name a changed module; the verifiers, the Full Gate and
-// whatever the gate cannot narrow run in CI, and a push to main runs everything.
+// pre-push scope (#288): fast feedback only. It runs the Harness unit tests that name a changed module; the integration tests (#300), the
+// verifiers, the Full Gate and whatever the gate cannot narrow run in CI, and a push to main runs everything.
 const zero = /^0{40}$/;
 
 export function planPushGate({ refs, head, fallbackBase }) {
@@ -63,7 +63,7 @@ export async function runPushGate({ root, refs, runTests, install, log = () => {
   const leftovers = [];
   let tests = [];
   const passed = await inPushedCommit({ root, sha, log, leftovers }, async workspace => {
-    ({ tests } = await selectHarnessTests({ root: workspace, config, files }));
+    ({ tests } = await selectHarnessTests({ root: workspace, config, files, stage: 'pre-push' }));
     log(`Push gate: Harness tests ${tests.length ? tests.join(' ') : '(none)'}`);
     return !tests.length || (await install(workspace) && await runTests(workspace, tests));
   });

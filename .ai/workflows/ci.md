@@ -102,7 +102,9 @@ Engineering Issueは起点の判定に使わない（[docs/workflows/engineering
 それ以外（`prototypes/`、docs、Harness本体など）だけを変更するPRはchange-typeを持たずSBIなしで通り、Verifierは差分だけで選ぶ。mainへのpushでもsource確認は行わない。
 判定理由はimpact jobとharness jobのログに出る。`Change type: engineering / SBI not required`か`Change type: ambiguous / SBI required (fail-closed)`の行に続けて、ファイルごとに当たったルール（`Change type rule <id>: <path>`）か、証明できなかった理由（`Change type ambiguous: <path> (<reason>)`）を出す。harness jobの `SBI source check:` 行にSBI sourceの結果が出て、検査に通ったときだけ`Source: SBI #<番号>`を出す。harness jobはIssueを読むため `issues: read` と `GH_TOKEN` を持つ。
 
-`impact.fullGate` のパス（`tools/harness/`、`.harness/config|verification|rules|skills/`、`.github/`、`.githooks/`、`AGENTS.md`、`.ai/`）のうち、Harnessモジュール（`tools/harness/**/*.mjs`、`.harness/verification/**/*.mjs`）だけが変わったPRは、そのモジュールをimportするかパスとして名指しするテストだけを実行する（#288）。他のモジュール経由でしか届かないテストは選ばない。それ以外のパス（config・rules・workflow・hook・fixture等）が変わったときはFull Gateを実行する。
+`impact.fullGate` のパス（`tools/harness/`、`.harness/config|verification|rules|skills/`、`.github/`、`.githooks/`、`AGENTS.md`、`.ai/`）のうち、Harnessモジュール（`tools/harness/**/*.mjs`、`.harness/verification/**/*.mjs`）だけが変わったPRは、そのモジュールをimportするかパスとして名指しするテストだけを実行する（#288）。他のモジュール経由でしか届かないテストは選ばない。
+
+ただし、Harnessの流れを丸ごと動かすintegrationテストは、importではなく担当モジュールで選ぶ（#300）。integrationテストと担当モジュールの対応は`.harness/config/harness.json`の`harnessTests.integration`に宣言する。PRのCIは、そのテスト自身か担当モジュールが変わったときだけ実行し、`io.mjs`・`index.mjs`・`workspace.mjs`のような共通モジュールの変更では選ばない。宣言されていないテストはunitテストとして、importか名指しで選ぶ。宣言したテストか担当モジュールが存在しないときは、選択そのものを失敗させる。mainへのpushは全件を実行する。それ以外のパス（config・rules・workflow・hook・fixture等）が変わったときはFull Gateを実行する。
 `impact.toolchain` のパス（`.node-version`、`.tool-versions`、root の `package.json`、`pnpm-workspace.yaml`、`.npmrc`）が変わったときは、全Application VerifierとFull Gateを実行する。ログの理由は`toolchain:<path>`になる。workflowはこの判定の出力を使うだけで、pathを持たない。
 mainへのpushでは全Verifierを実行し、Full Gateも実行する。
 Full Gateの`harness-demo`は、PRでは`harness:demo`（fake providerの自己修復ループだけ）、mainへのpushでは`harness:demo --full`（lane内の全アプリVerifierをrun worktreeで再実行）になる。PRで約7分かかっていたのは`--full`の分で、ループ自体の検証には要らない（#192）。
@@ -158,7 +160,7 @@ pnpm harness:verify --verifier admin --base origin/main
 
 ## pre-pushとの分担
 
-pre-pushは速いフィードバックだけを返す（#288）。`.githooks/pre-push`は`harness:check`と`harness:push-gate`を呼ぶだけで、Verifierの一覧を持たない。`harness:push-gate`はgitから渡されたpush先のcommitとの差分から、変更したHarnessのモジュール（`tools/harness/**/*.mjs`、`.harness/verification/**/*.mjs`）をimportするか、パスとして名指しするテストだけを実行する。新しいbranchは`origin/main`と比べる。Verifier（Docker）、`harness:test`全件、`harness:demo`はpre-pushで実行せず、CIに任せる。
+pre-pushは速いフィードバックだけを返す（#288）。`.githooks/pre-push`は`harness:check`と`harness:push-gate`を呼ぶだけで、Verifierの一覧を持たない。`harness:push-gate`はgitから渡されたpush先のcommitとの差分から、変更したHarnessのモジュール（`tools/harness/**/*.mjs`、`.harness/verification/**/*.mjs`）をimportするか、パスとして名指しするunitテストだけを実行する。integrationテスト（`harnessTests.integration`）は担当モジュールが変わってもpre-pushでは実行せず、CIに任せる（#300）。新しいbranchは`origin/main`と比べる。Verifier（Docker）、`harness:test`全件、`harness:demo`はpre-pushで実行せず、CIに任せる。
 
 テストはcheckoutのworking treeではなく、pushするcommitのdetached worktree（OSの一時ディレクトリ）で実行する。未commitの修正でworking treeだけがPASSしても、壊れたcommitはpushできない。worktreeでは`pnpm install --frozen-lockfile --prefer-offline`を先に実行する。実行後は`git worktree remove`（forceなし）で消し、テストが未追跡ファイルを残して消せなかったときはパスをログに出して残す。
 
