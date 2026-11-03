@@ -1,6 +1,6 @@
 # Harness詳細仕様
 
-[README](../../README.md)から移した詳細仕様。
+Harnessの各機能の仕様。日々の手順は[開発フロー](../workflows/local-harness.md)を参照。
 
 ## 実行
 

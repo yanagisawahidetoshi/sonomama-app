@@ -19,9 +19,11 @@ pnpm harness:check
 # PBIのGitHub IssueからSBIを作る
 pnpm harness:plan <GitHub Issue URL> --provider claude
 
-# SBIを実装する
-pnpm harness:run --provider claude --sbi <SBI>
+# レビュー済みのSBIをJSONに書き、実装する
+pnpm harness:run --provider claude --sbi <SBI JSON>
 ```
+
+runが承認待ちで止まった後の手順は[開発フロー](docs/workflows/local-harness.md)にある。
 
 ## Docs
 
