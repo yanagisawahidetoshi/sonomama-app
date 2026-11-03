@@ -12,10 +12,13 @@ export const isComposeCommand = ([docker, compose, flag, file]) => docker === 'd
 function isolationRules(v, ctx) {
   const all = [...(v.setupCommands ?? []), ...v.commands];
   if (v.isolation === 'harness' && !all.every(c => isHarnessScript(v.directory, c))) ctx.addIssue({ code: 'custom', message: 'harness isolation only runs tools/harness scripts' });
+  if (v.dependencyStore && v.isolation !== 'container') ctx.addIssue({ code: 'custom', message: 'the shared dependency store is only for container isolation' });
   if (v.isolation === 'compose' && (!v.network || !all.every(c => isComposeCommand(c) || isHarnessScript(v.directory, c)))) ctx.addIssue({ code: 'custom', message: 'compose isolation only runs docker compose -f FILE or tools/harness scripts and requires network' });
 }
 // Setup commands run before the verification commands, each phase with its own time limit (#246).
-const phaseSettings = { setupCommands: z.array(z.array(text).min(1)).default([]), setupTimeoutMs: z.number().int().min(100).max(1800000).optional(), timeoutMs: z.number().int().min(100).max(600000).optional() };
+const phaseSettings = { setupCommands: z.array(z.array(text).min(1)).default([]), setupTimeoutMs: z.number().int().min(100).max(1800000).optional(), timeoutMs: z.number().int().min(100).max(600000).optional(),
+  // #272: install from the pnpm store shared across runs, which only the Harness fetch writes to (container isolation only).
+  dependencyStore: z.enum(['pnpm']).optional() };
 export const relativePath = text.refine(p => !p.startsWith('/') && !p.includes('\\') && p.split('/').every(s => s !== '..' && s !== '.' && s !== ''), 'unsafe relative path');
 // A directory scope ends with '/' so it can never be read as a file name, and allowedFiles keeps meaning exactly those files.
 export const directoryPath = text.refine(p => p.endsWith('/') && relativePath.safeParse(p.slice(0, -1)).success, 'directory scope must be a safe relative path ending with /');
