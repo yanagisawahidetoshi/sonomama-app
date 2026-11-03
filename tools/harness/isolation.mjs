@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, readFile, readdir, lstat, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, lstat, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { join, resolve, relative, dirname, isAbsolute } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
@@ -100,6 +100,41 @@ async function secretPaths(workspace, directory = '') {
   return found;
 }
 
+// #272: the pnpm store shared by container verifiers across runs. Its layout follows the pnpm of the image, so the image tag names it.
+// Only fetchStore writes to it. Reset it with `docker volume rm` when needed; the Harness never removes it.
+const storeVolume = image => `sonomama-harness-pnpm-store-${image.split(':').at(-1)}`;
+const fetchStep = ['pnpm', 'fetch', '--ignore-pnpmfile', '--ignore-scripts'];
+const refused = message => ({ ok: false, code: null, signal: null, timedOut: false, error: message, durationMs: 0, stdout: '', stderr: message });
+// The trusted fetch runs as a setup process before the install, under the setup limit. It sees only copies of the lockfile and
+// the workspace list, never the workspace (.npmrc, .pnpmfile.cjs, package scripts), and runs no package code. The store is
+// content-addressed, so a package an Agent adds to the lockfile can only be fetched as the content its integrity hash names;
+// a package without one is refused. The verifier then installs offline: a package missing from the store fails the setup.
+async function fetchStore({ workspace, docker, image, store, user, inputs, limit }) {
+  let lock;
+  try { lock = await readFile(join(workspace, 'pnpm-lock.yaml'), 'utf8'); } catch { return refused('pnpm-lock.yaml is missing; the shared store cannot be filled'); }
+  let unverified;
+  try { unverified = Object.entries(YAML.parse(lock)?.packages || {}).filter(([, entry]) => !entry?.resolution?.integrity).map(([id]) => id); } catch { return refused('pnpm-lock.yaml cannot be parsed'); }
+  if (unverified.length) return refused(`packages without an integrity hash are not fetched into the shared store: ${unverified.slice(0, 5).join(', ')}`);
+  await mkdir(inputs, { recursive: true });
+  await writeFile(join(inputs, 'pnpm-lock.yaml'), lock);
+  const list = await readFile(join(workspace, 'pnpm-workspace.yaml'), 'utf8').catch(() => null);
+  if (list !== null) await writeFile(join(inputs, 'pnpm-workspace.yaml'), list);
+  const hardened = ['--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--read-only'];
+  const volume = ['--mount', `type=volume,src=${store},dst=/pnpm-store`];
+  // A new volume belongs to root; only this step takes it for the host user.
+  const owned = await execute(docker, ['run', '--rm', '--network', 'none', '--user', '0', ...hardened, '--cap-add', 'CHOWN', ...volume, image, 'chown', user, '/pnpm-store'], { env: dockerCliEnv(), timeoutMs: 60000 });
+  if (!owned.ok) return owned;
+  const name = `sonomama-store-fetch-${randomUUID()}`;
+  try {
+    return await execute(docker, ['run', '--rm', '--name', name, '--network', 'bridge', '--user', user, ...hardened, '--pids-limit', '4096',
+      '--tmpfs', '/tmp:rw,exec,mode=1777', '--tmpfs', '/work:rw,mode=1777', ...Object.entries(containerEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+      '--mount', `type=bind,src=${inputs},dst=/inputs,readonly`, ...volume, '--workdir', '/work',
+      image, 'sh', '-c', `cp /inputs/* /work/ && exec ${fetchStep.join(' ')} --store-dir /pnpm-store`], { env: dockerCliEnv(), timeoutMs: limit });
+  } finally {
+    // A fetch killed at its limit leaves its container behind.
+    await execute(docker, ['rm', '-f', name], { env: dockerCliEnv(), timeoutMs: 60000 });
+  }
+}
 async function container({ workspace, adapter, setup, commands, docker, cwd, limits }) {
   if (/[,=]/.test(workspace) || !inside(workspace, cwd)) return unavailable('workspace path cannot be mounted');
   const image = await ensureImage(docker);
@@ -115,20 +150,26 @@ async function container({ workspace, adapter, setup, commands, docker, cwd, lim
       if (!info) continue;
       masks.push('--mount', info.isDirectory() ? `type=tmpfs,dst=/workspace/${path}` : `type=bind,src=${empty},dst=/workspace/${path},readonly`);
     }
-    const volumes = [...(await moduleDirectories(workspace)).map(path => `/workspace/${path}`), '/pnpm-store'];
+    // #272: a verifier with the shared store sees it read-only; any other verifier gets a store of its own for the run.
+    const shared = adapter.dependencyStore === 'pnpm' ? storeVolume(image) : null;
+    const volumes = [...(await moduleDirectories(workspace)).map(path => `/workspace/${path}`), ...shared ? [] : ['/pnpm-store']];
+    const sharedMount = shared ? ['--mount', `type=volume,src=${shared},dst=/pnpm-store,readonly`] : [];
     const user = `${process.getuid()}:${process.getgid()}`;
     const started = await execute(docker, ['run', '-d', '--name', name, '--network', adapter.network ? 'bridge' : 'none', '--user', user,
       // CHOWN and DAC_READ_SEARCH (to reach volumes under a 0700 workspace) are only usable by the root setup exec below;
       // the verifier user has no capabilities and cannot gain any.
       '--cap-drop', 'ALL', '--cap-add', 'CHOWN', '--cap-add', 'DAC_READ_SEARCH', '--security-opt', 'no-new-privileges', '--read-only', '--pids-limit', '4096', '--tmpfs', '/tmp:rw,exec,mode=1777',
       ...Object.entries(containerEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
-      '--mount', `type=bind,src=${workspace},dst=/workspace`, ...masks, ...volumes.flatMap(dst => ['--mount', `type=volume,dst=${dst}`]),
+      '--mount', `type=bind,src=${workspace},dst=/workspace`, ...masks, ...volumes.flatMap(dst => ['--mount', `type=volume,dst=${dst}`]), ...sharedMount,
       '--workdir', '/workspace', image, 'sleep', 'infinity'], { env: dockerCliEnv(), timeoutMs: 120000 });
     if (!started.ok) return unavailable('container could not be started', started);
     const prepared = await execute(docker, ['exec', '-u', '0', name, 'chown', user, ...volumes], { env: dockerCliEnv(), timeoutMs: 60000 });
     if (!prepared.ok) return unavailable('container volumes could not be prepared', prepared);
     const workdir = ['/workspace', relative(workspace, cwd)].filter(Boolean).join('/');
-    return await phased({ setup, commands, limits, run: (command, limit) => execute(docker, ['exec', '-w', workdir, name, ...command], { env: dockerCliEnv(), timeoutMs: limit }) });
+    const steps = shared && setup.length ? [fetchStep, ...setup] : setup;
+    return await phased({ setup: steps, commands, limits, run: (command, limit) => command === fetchStep
+      ? fetchStore({ workspace, docker, image, store: shared, user, inputs: join(temp, 'store-inputs'), limit })
+      : execute(docker, ['exec', '-w', workdir, name, ...command], { env: dockerCliEnv(), timeoutMs: limit }) });
   } finally {
     await execute(docker, ['rm', '-f', '-v', name], { env: dockerCliEnv(), timeoutMs: 60000 });
     await rm(temp, { recursive: true, force: true });

@@ -294,11 +294,12 @@
           "pnpm",
           "install",
           "--frozen-lockfile",
-          "--prefer-offline",
+          "--offline",
           "--filter",
           "mobile"
         ]
-      ]
+      ],
+      "dependencyStore": "pnpm"
     },
     {
       "id": "mobile-acceptance",
@@ -453,11 +454,12 @@
           "pnpm",
           "install",
           "--frozen-lockfile",
-          "--prefer-offline",
+          "--offline",
           "--filter",
           "admin"
         ]
-      ]
+      ],
+      "dependencyStore": "pnpm"
     },
     {
       "id": "admin-acceptance",
@@ -585,11 +587,12 @@
           "pnpm",
           "install",
           "--frozen-lockfile",
-          "--prefer-offline",
+          "--offline",
           "--filter",
           "prototype-web"
         ]
-      ]
+      ],
+      "dependencyStore": "pnpm"
     },
     {
       "id": "prototype-web-acceptance",
@@ -678,11 +681,12 @@
           "pnpm",
           "install",
           "--frozen-lockfile",
-          "--prefer-offline",
+          "--offline",
           "--filter",
           "prototype-mobile"
         ]
-      ]
+      ],
+      "dependencyStore": "pnpm"
     },
     {
       "id": "prototype-mobile-acceptance",
@@ -1128,11 +1132,12 @@
           "pnpm",
           "install",
           "--frozen-lockfile",
-          "--prefer-offline",
+          "--offline",
           "--filter",
           "admin"
         ]
-      ]
+      ],
+      "dependencyStore": "pnpm"
     },
     {
       "id": "mobile-authn-test",
@@ -1166,11 +1171,12 @@
           "pnpm",
           "install",
           "--frozen-lockfile",
-          "--prefer-offline",
+          "--offline",
           "--filter",
           "mobile"
         ]
-      ]
+      ],
+      "dependencyStore": "pnpm"
     }
   ],
   "impact": {
