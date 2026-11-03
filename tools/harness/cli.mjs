@@ -183,12 +183,11 @@ try {
     // git hands the pushed refs to .githooks/pre-push on stdin; the hook passes them through HARNESS_PUSH_REFS.
     // The refs describe this push only; hook tests inside harness:test must not inherit them.
     const { HARNESS_PUSH_REFS: refs = '', ...env } = process.env;
-    const pnpm = (args, cwd) => spawnSync('pnpm', args, { cwd, stdio: 'inherit', env }).status === 0;
-    // Each check runs in the detached worktree of the pushed commit, which starts without node_modules.
+    const run = (command, args, cwd) => spawnSync(command, args, { cwd, stdio: 'inherit', env }).status === 0;
+    // The selected tests run in the detached worktree of the pushed commit, which starts without node_modules; same concurrency as harness:test.
     const result = await runPushGate({ root, refs, log: line => console.log(redactText(line)),
-      install: workspace => pnpm(['install', '--frozen-lockfile', '--prefer-offline'], workspace),
-      runFull: workspace => pnpm(['harness:test'], workspace),
-      verifyOne: async (id, base, workspace) => { process.env.HARNESS_BASE_REF = base; return printVerifier({ root: workspace, base, all: false, id }); } });
+      install: workspace => run('pnpm', ['install', '--frozen-lockfile', '--prefer-offline'], workspace),
+      runTests: (workspace, tests) => run(process.execPath, ['--test', `--test-concurrency=${env.HARNESS_TEST_CONCURRENCY || 3}`, ...tests], workspace) });
     process.exitCode = result.passed ? 0 : 1;
   } else if (command === 'pr') {
     if (!options['--run']) throw new Error('pr requires --run ID');

@@ -115,7 +115,8 @@ describe('Push gate execution',()=>{
     const head=(await git(root,['rev-parse','HEAD'])).stdout.trim();
     return `refs/heads/feature ${head} refs/heads/feature ${base}\n`;
   };
-  const module={'tools/harness/light.mjs':'export const light = true;\n','tools/harness/light.test.mjs':"import { light } from './light.mjs';\n"};
+  // The module is named through a variable: a literal path in this file would make this test select itself.
+  const light='light', module={[`tools/harness/${light}.mjs`]:'export const light = true;\n',[`tools/harness/${light}.test.mjs`]:`import { light } from './${light}.mjs';\n`};
   const gate=async (root,refs,{passes=true}={})=>{
     const ran=[]; let installed=0;
     const result=await runPushGate({root,refs,install:async()=>{ installed++; return true; },runTests:async (workspace,tests)=>{ ran.push(...tests); return passes; }});
@@ -135,7 +136,7 @@ describe('Push gate execution',()=>{
     it('when tests import the module then runs only those tests on the pushed commit',()=>fixture(async root=>{
       const result=await gate(root,await branch(root,module));
       assert.equal(result.mode,'impact');
-      assert.deepEqual(result.ran,['tools/harness/light.test.mjs']);
+      assert.deepEqual(result.ran,[`tools/harness/${light}.test.mjs`]);
       assert.equal(result.installed,1);
       assert.equal(result.passed,true);
     }));
@@ -176,9 +177,9 @@ describe('Push gate execution',()=>{
     const gone=async path=>access(path).then(()=>false,()=>true);
     it('when HEAD is broken and only an uncommitted fix passes then tests the pushed commit and stops the push',()=>fixture(async root=>{
       const refs=await branch(root,module);
-      await writeFile(join(root,'tools/harness/light.mjs'),'export const light = "fixed";\n');
+      await writeFile(join(root,`tools/harness/${light}.mjs`),'export const light = "fixed";\n');
       const result=await runPushGate({root,refs,install:async()=>true,
-        runTests:async workspace=>(await readFile(join(workspace,'tools/harness/light.mjs'),'utf8')).includes('fixed')});
+        runTests:async workspace=>(await readFile(join(workspace,`tools/harness/${light}.mjs`),'utf8')).includes('fixed')});
       assert.equal(result.passed,false);
     }));
     it('when the gate tests then hands over a detached worktree at the pushed commit outside the checkout and removes it afterwards',()=>fixture(async root=>{
