@@ -4,7 +4,7 @@ require "rails_helper"
 
 RSpec.describe "Health check", type: :request do
   describe "GET /api/v1/health" do
-    context "when the client has no authentication headers or cookies" do
+    context "when the client sends no headers or cookies" do
       it "returns the health status as defined by the API contract", :aggregate_failures do
         get "/api/v1/health"
 
