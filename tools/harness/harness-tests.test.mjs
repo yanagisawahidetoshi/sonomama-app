@@ -126,3 +126,23 @@ describe('Harness test selection by stage', () => {
     });
   });
 });
+
+// A declaration outside the directories harness:test runs would pass the existence check yet never select anything.
+describe('Harness integration test declaration', () => {
+  const declare = async integration => {
+    const root = new URL('../../', import.meta.url).pathname;
+    const repo = JSON.parse(await readFile(join(root, '.harness/config/harness.json'), 'utf8'));
+    return configSchema.safeParse({ ...repo, harnessTests: { integration } }).success;
+  };
+  describe('given an integration test and its owners', () => {
+    it('when both are Harness modules in the test directories then the configuration is accepted', async () => {
+      assert.equal(await declare({ 'tools/harness/agents/provider.test.mjs': ['tools/harness/agents/provider.mjs'], '.harness/verification/lib/assert.test.mjs': ['tools/harness/io.mjs'] }), true);
+    });
+    it('when the integration test lies outside the Harness then the configuration is rejected', async () => {
+      assert.equal(await declare({ 'apps/admin/src/main.test.mjs': ['tools/harness/io.mjs'] }), false);
+    });
+    it('when an owner module lies outside the Harness then the configuration is rejected', async () => {
+      assert.equal(await declare({ 'tools/harness/io.test.mjs': ['packages/api-schema/index.mjs'] }), false);
+    });
+  });
+});
