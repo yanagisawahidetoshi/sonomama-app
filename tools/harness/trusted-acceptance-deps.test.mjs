@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { verify } from './verifier.mjs';
@@ -64,6 +64,53 @@ describe('Dependencies of a Trusted Acceptance run against a PR tree', () => {
       const result = await judge(t);
       assert.equal(status(result), 'FAIL');
       assert.match(stderr(result), /ERR_ACCESS_DENIED|ERR_MODULE_NOT_FOUND|not in the trusted installation/);
+    }));
+  });
+  // The permission model already denies reading above the trusted root; a symlink inside the installation that points at a readable
+  // directory outside it is what only the resolver check stops.
+  describe('given a trusted package whose own dependency is a symlink out of the trusted installation', () => {
+    it('when the trusted package imports it then the run fails and the package outside the trusted installation is never loaded', () => trees(async t => {
+      await pkg(t.root, 'harness-dep', 'trusted');
+      await writeFile(join(t.root, 'node_modules/harness-dep/index.mjs'), "export { source } from 'outside-dep';\n");
+      await pkg(join(t.workspace, 'planted'), 'outside-dep', 'outside');
+      await symlink(join(t.workspace, 'planted/node_modules/outside-dep'), join(t.root, 'node_modules/outside-dep'));
+      const result = await judge(t);
+      assert.equal(status(result), 'FAIL');
+      assert.doesNotMatch(stderr(result), /resolved from outside/);
+    }));
+  });
+  describe('given a trusted package whose own dependency exists only above the trusted root', () => {
+    it('when the trusted package imports it then the run fails and the package outside the trusted installation is never loaded', () => trees(async t => {
+      await pkg(t.root, 'harness-dep', 'trusted');
+      await writeFile(join(t.root, 'node_modules/harness-dep/index.mjs'), "export { source } from 'outside-dep';\n");
+      await pkg(join(t.root, '..'), 'outside-dep', 'outside');
+      const result = await judge(t);
+      assert.equal(status(result), 'FAIL');
+      assert.doesNotMatch(stderr(result), /resolved from outside/);
+    }));
+  });
+  describe('given code under test that loads the package with require()', () => {
+    const cjs = async t => {
+      await mkdir(join(t.root, 'node_modules/harness-dep'), { recursive: true });
+      await writeFile(join(t.root, 'node_modules/harness-dep/package.json'), JSON.stringify({ name: 'harness-dep', main: 'index.cjs' }));
+      await writeFile(join(t.root, 'node_modules/harness-dep/index.cjs'), "exports.source = 'trusted';\n");
+      await writeFile(join(t.workspace, 'tools/under-test.cjs'), "exports.source = require('harness-dep').source;\n");
+      await writeFile(join(t.workspace, 'tools/under-test.mjs'), "export { source } from './under-test.cjs';\n");
+    };
+    it('when the trusted installation has the package then require() resolves it from there', () => trees(async t => {
+      await cjs(t);
+      assert.equal(status(await judge(t)), 'PASS');
+    }));
+    it('when only the PR tree has the package then require() fails instead of loading the PR copy', () => trees(async t => {
+      await cjs(t);
+      await rm(join(t.root, 'node_modules/harness-dep'), { recursive: true });
+      await pkg(t.workspace, 'harness-dep', 'pr');
+      await mkdir(join(t.workspace, 'node_modules/harness-dep'), { recursive: true });
+      await writeFile(join(t.workspace, 'node_modules/harness-dep/package.json'), JSON.stringify({ name: 'harness-dep', main: 'index.cjs' }));
+      await writeFile(join(t.workspace, 'node_modules/harness-dep/index.cjs'), "exports.source = 'pr';\n");
+      const result = await judge(t);
+      assert.equal(status(result), 'FAIL');
+      assert.doesNotMatch(stderr(result), /resolved from pr/);
     }));
   });
   describe('given a trusted root without node_modules', () => {
