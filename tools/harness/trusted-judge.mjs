@@ -45,7 +45,8 @@ export function judgeEvidenceJobs({ jobs, impact }) {
   const needs = {
     impact: group(true, ['impact']),
     verifiers: group(impact.requiredVerifiers.length > 0, impact.requiredVerifiers.map(id => `verifiers (${id})`)),
-    'harness-test': group(impact.fullGate, shards.length ? shards : ['harness-test (1)']),
+    // #288: a PR that changes Harness modules runs the tests they select without the full gate, as judgeCi expects.
+    'harness-test': group(impact.fullGate || impact.harnessTests?.length > 0, shards.length ? shards : ['harness-test (1)']),
     'harness-demo': group(impact.fullGate, ['harness-demo']),
     maestro: group((impact.maestro ?? []).length > 0, ['maestro']),
   };
