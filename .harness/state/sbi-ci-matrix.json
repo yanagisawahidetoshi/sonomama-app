@@ -1,8 +1,8 @@
 {
   "id": "SBI-CI-MATRIX",
   "title": "SBIの影響範囲に応じてVerifierを動的選択・並列実行しCIを高速化する",
-  "description": "Issue #34。SBIのaffectedAreas・requiredVerifiersとGit diffからrequired verifierを決め、GitHub Actionsのdynamic matrixで並列実行し、Completion Judge（harness job）で集約する。Harness本体の変更時だけFull Gate（harness:test / harness:demo）を並列で実行し、実アプリVerifierまで回す--fullはPR以外（mainへのpush）に限る。api-contract verifierはOpenAPI 3.1の検証とbaseとの破壊的変更検出を行い、OpenAPIが未作成の間はplaceholderとしてSKIPする。",
-  "gherkin": "Feature: SBIに応じたVerifierの選択と並列実行\n  Scenario: 複数領域のSBI\n    Given affectedAreasがapiとmobileのSBIがある\n    When Impact Analysisを実行する\n    Then rails / expo / api-contractがrequiredになり、理由がCIログに出る\n  Scenario: SBIとdiffの矛盾\n    Given adminのSBIでapps/mobileも変更されている\n    When Impact Analysisを実行する\n    Then expoが安全側に追加される\n  Scenario: Completion Judge\n    Given required verifierのmatrixで1つがFAILした\n    When harness jobが集約する\n    Then FAILになる\n  Scenario: Full Gate\n    Given tools/harnessが変更されている\n    When CIを実行する\n    Then harness:testとharness:demoが並列に実行される\n    And PRのharness:demoには--fullが付かない",
+  "description": "Issue #34。SBIのaffectedAreas・requiredVerifiersとGit diffからrequired verifierを決め、GitHub Actionsのdynamic matrixで並列実行し、Completion Judge（harness job）で集約する。Harnessのテストは、PRでは変更影響範囲だけ、mainへのpushでは全件を実行する。Full Gate（harness:test全件 / harness:demo）はモジュール以外のHarness変更とmainへのpushに限り、実アプリVerifierまで回す--fullはmainへのpushに限る（#288）。api-contract verifierはOpenAPI 3.1の検証とbaseとの破壊的変更検出を行い、OpenAPIが未作成の間はplaceholderとしてSKIPする。",
+  "gherkin": "Feature: SBIに応じたVerifierの選択と並列実行\n  Scenario: 複数領域のSBI\n    Given affectedAreasがapiとmobileのSBIがある\n    When Impact Analysisを実行する\n    Then rails / expo / api-contractがrequiredになり、理由がCIログに出る\n  Scenario: SBIとdiffの矛盾\n    Given adminのSBIでapps/mobileも変更されている\n    When Impact Analysisを実行する\n    Then expoが安全側に追加される\n  Scenario: Completion Judge\n    Given required verifierのmatrixで1つがFAILした\n    When harness jobが集約する\n    Then FAILになる\n  Scenario: Harnessテストの範囲\n    Given tools/harnessのモジュールが変更されている\n    When PRのCIを実行する\n    Then そのモジュールを名指しするHarnessテストだけが実行され、mainへのpushではHarnessテスト全件が実行される\n    And PRのharness:demoには--fullが付かない",
   "acceptanceCriteria": [
     {
       "id": "CI-AC-1",
@@ -76,7 +76,7 @@
     },
     {
       "id": "CI-AC-15",
-      "description": "Harness本体を変更したPRではFull Gateが発動する",
+      "description": "PRでは変更影響範囲のHarnessテストを実行し、mainへのpushではHarnessテスト全件を実行する",
       "verifier": "ci-matrix-acceptance"
     },
     {
@@ -113,7 +113,7 @@
   ],
   "risks": [
     "CIのrequired check名（harness）を変えるとmergeがブロックされる",
-    "Full Gateのパターンが漏れるとHarness本体の回帰を見逃す"
+    "影響範囲のテスト選択が漏れたHarness本体の回帰は、mainへのpushまで見つからない"
   ],
   "ambiguous": false,
   "requiresDesignDecision": false,

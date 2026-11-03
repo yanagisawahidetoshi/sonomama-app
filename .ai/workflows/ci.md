@@ -4,9 +4,9 @@
 
 | job | 内容 |
 | --- | --- |
-| `impact` | `pnpm harness:impact` でrequired verifierとFull Gateの要否を決め、理由をログに出す |
+| `impact` | `pnpm harness:impact` でrequired verifier、Full Gateの要否、影響範囲のHarnessテストを決め、理由をログに出す |
 | `verifiers` | required verifierごとのmatrix。`pnpm harness:verify --verifier <id>` を並列に実行する（`fail-fast: false`） |
-| `harness-test` / `harness-demo` | Full Gateのときだけ、`harness:test` と `harness:demo` を並列に実行する。実アプリVerifierまで回す `--full`（`HARNESS_DEMO_SCOPE`）はPR以外、つまりmainへのpushだけに付く |
+| `harness-test` / `harness-demo` | `harness-test`はFull Gateなら全件、Harnessモジュールだけの変更なら影響範囲のテスト（`HARNESS_TESTS`）をshardで実行する。`harness-demo`はFull Gateのときだけ実行する。実アプリVerifierまで回す `--full`（`HARNESS_DEMO_SCOPE`）はmainへのpushだけに付く |
 | `maestro` | `impact` の `maestro` が空でないときだけ、Android EmulatorでMaestroを実行する（下記）。mainへのpushではDevelopment BuildのAPK cacheだけを作る |
 | `harness` | Completion Judge。変更されたSBIのTrusted AcceptanceとSecurity Verifierを実行し、各jobの結果を集約する。必須チェック名なのでjob idを変えない |
 
@@ -102,7 +102,7 @@ Engineering Issueは起点の判定に使わない（[docs/workflows/engineering
 それ以外（`prototypes/`、docs、Harness本体など）だけを変更するPRはchange-typeを持たずSBIなしで通り、Verifierは差分だけで選ぶ。mainへのpushでもsource確認は行わない。
 判定理由はimpact jobとharness jobのログに出る。`Change type: engineering / SBI not required`か`Change type: ambiguous / SBI required (fail-closed)`の行に続けて、ファイルごとに当たったルール（`Change type rule <id>: <path>`）か、証明できなかった理由（`Change type ambiguous: <path> (<reason>)`）を出す。harness jobの `SBI source check:` 行にSBI sourceの結果が出て、検査に通ったときだけ`Source: SBI #<番号>`を出す。harness jobはIssueを読むため `issues: read` と `GH_TOKEN` を持つ。
 
-`impact.fullGate` のパス（`tools/harness/`、`.harness/config|verification|rules|skills/`、`.github/`、`.githooks/`、`AGENTS.md`、`.ai/`）が変わったときはFull Gateも実行する。
+`impact.fullGate` のパス（`tools/harness/`、`.harness/config|verification|rules|skills/`、`.github/`、`.githooks/`、`AGENTS.md`、`.ai/`）のうち、Harnessモジュール（`tools/harness/**/*.mjs`、`.harness/verification/**/*.mjs`）だけが変わったPRは、そのモジュールをimportするかパスとして名指しするテストだけを実行する（#288）。他のモジュール経由でしか届かないテストは選ばない。それ以外のパス（config・rules・workflow・hook・fixture等）が変わったときはFull Gateを実行する。
 `impact.toolchain` のパス（`.node-version`、`.tool-versions`、root の `package.json`、`pnpm-workspace.yaml`、`.npmrc`）が変わったときは、全Application VerifierとFull Gateを実行する。ログの理由は`toolchain:<path>`になる。workflowはこの判定の出力を使うだけで、pathを持たない。
 mainへのpushでは全Verifierを実行し、Full Gateも実行する。
 Full Gateの`harness-demo`は、PRでは`harness:demo`（fake providerの自己修復ループだけ）、mainへのpushでは`harness:demo --full`（lane内の全アプリVerifierをrun worktreeで再実行）になる。PRで約7分かかっていたのは`--full`の分で、ループ自体の検証には要らない（#192）。
@@ -113,7 +113,7 @@ Full Gateの`harness-demo`は、PRでは`harness:demo`（fake providerの自己�
 
 | 区分 | 内容 |
 | --- | --- |
-| Application | `verifiers` matrixと、Full Gateなら`harness-test` / `harness-demo`のjob結果 |
+| Application | `verifiers` matrixと、`harness-test`（Full Gateか影響範囲のテストがあるとき）・`harness-demo`（Full Gateのとき）のjob結果 |
 | Acceptance | 変更されたSBIのTrusted Acceptance（`trust: acceptance`）をjudge内で実行した結果。生成したTrusted Acceptanceは下記 |
 | Security | `classifySecurity()`がdiffとSBIから決めたrequired verifierを`verifySecurity()`で評価した結果。`alwaysRequiredVerifiers`（secret-scan・forbidden-pattern-check）は常に含む。`appliesTo`を持つ実装Verifierは、ルールに一致したファイルがその範囲に入るときだけ含む |
 

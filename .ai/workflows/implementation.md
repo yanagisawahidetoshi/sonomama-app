@@ -16,7 +16,7 @@
    PRを作らないLocal modeでは、LEVEL 2は1人、LEVEL 3は異なる2人以上がapprove --phase mergeで承認する。
 7. 判定の更新が要るときだけ、保守用のresume --run IDでMERGE_ALLOWEDとautoMergeEligibleを確認する。
    merge判定の一時エラーはRETRYABLE（executionStatusはDONEのまま）。原因を解消してresumeし直す。
-8. レビュー待ちの間にmainが進んだら、最新のmainをpullして`pnpm harness:reverify <PR URL>`を実行する。実装を保持したまま再検証し、同じPRを更新する（[pull-request.md](pull-request.md)）。
+8. レビュー待ちの間にmainが進んでも、追従もreverifyもしない。conflictが出たときだけPR branchで解消する（ADR-0011）。`harness:reverify`は必要なときだけ使う補助手段（[pull-request.md](pull-request.md)）。
 9. 実際のmergeは人間が行う。このHarnessはmergeしない。
 
 SBI承認とマージ承認は別purpose・別context。使い回せない。実装前Gate（implementation-gate）は無い。
@@ -33,10 +33,10 @@ PBI → SBI Plannerは[pbi-sbi-planner.md](pbi-sbi-planner.md)。API変更はSch
 1. Nodeは.node-version、pnpmはpackageManagerの版を使う。
 2. pnpm install --frozen-lockfileで依存とpre-push hookを準備する。再設定はpnpm hooks:install。
 3. BDDテストを先に書き、失敗確認・テストcommit後に実装する。
-4. harness:checkとharness:testの成功後、cleanなcommitからharness:demo --fullを実行する。
-5. push時にcheckと、差分に応じたVerifier（Full Gate対象ならtest全件）が自動実行される。CIはSBIと差分から必要なVerifierだけを並列実行する（[ci.md](ci.md)）。
+4. pre-pushは`harness:check`と、変更したHarnessモジュールを名指しするテストだけを実行する。Verifier・harness:test全件・demoは実行しない。
+5. PRのCIは変更影響範囲のテストとVerifierを実行し、mainへのpushで全件を実行する（[ci.md](ci.md)）。
 6. 元リポジトリのHEADを変える前にrunをレビューする。変更後は承認を再利用せず、新規runで再検証する。
-7. 人間が最終mergeする。HarnessはMERGE_ALLOWED判定まで。mainのRulesetは適用済みで、PR経由と`harness`の成功を必須にしている（[github-ruleset.md](../../docs/workflows/github-ruleset.md)）。
+7. 人間が最終mergeする。HarnessはMERGE_ALLOWED判定まで。mainのRulesetは適用済みで、PR経由と`Completion Judge`の成功を必須にしている（[github-ruleset.md](../../docs/workflows/github-ruleset.md)）。
 
 Application Testは許可scopeで修正可能。Trusted Acceptanceは.harness/verificationまたはtools/harnessで保護する。
 Verifierは差分のappliesToとlaneで選び、AC・Security・明示必須指定を優先する。任意の非該当だけSKIPできる。

@@ -22,14 +22,13 @@ Rails API・Expo・React adminの3アプリは開発環境まで構築済みで�
 
 ## 通常の開発フロー
 
-人間が使うコマンドは次の3つ。承認済みSBIは実装前Gateなしで実装・検証・AI Review・PR作成まで進む（#175）。`harness:reverify`はレビュー待ちの間にmainが進んだときだけ使う。
+人間が使うコマンドは次の3つ。承認済みSBIは実装前Gateなしで実装・検証・AI Review・PR作成まで進む（#175）。mainが進んでも追従は要らない。conflictが出たときだけPR branchで解消する。
 承認済みSBIで決められない判断が出たときだけ、runはESCALATED / NEEDS_HUMAN_DECISIONで止まる。人間がSBIを更新・再承認し、新しいrunで再開する。
 
 ```sh
 pnpm planner:sbi https://github.com/<owner>/<repo>/issues/<PBI番号>     # PBI → SBI Issue [sbi][needs-review]
 # 人間がSBI Issueをレビューし、needs-review を spec-approved に替える（手書きのTrusted Acceptanceを登録した場合は ready）
 pnpm harness:run https://github.com/<owner>/<repo>/issues/<SBI番号>     # 実装 → ローカル検証 → PR作成
-pnpm harness:reverify https://github.com/<owner>/<repo>/pull/<PR番号>  # mainが進んだときだけ。最新のmainをpullしてから実行する
 ```
 
 providerの既定はClaude。Codexだけ使える場合は各コマンドに`--provider codex`を付ける。
@@ -322,7 +321,7 @@ FAILやESCALATEDのrunではPRを作成しない。fake provider（`harness:demo
 GitHub PR modeでは、実装後の承認はGitHub Reviewで判定し、`--phase merge`は使わない。
 `harness:resume` / `harness:pr`は障害復旧・Harness保守用に残している。通常の操作では使わない。
 PRを作らないLocal mode（`--provider fake`など）では、`harness:approve --run RUN_ID --phase merge`で実装後の承認を記録する。
-base branchの先頭がrunのbaselineのままであること、tested SHAとPR HEADの一致、必須CIのPASS、CHANGES_REQUESTEDがないことも条件にする。Approveはwrite以上の権限を持つ人のものだけを数える。手順は[.ai/workflows/pull-request.md](.ai/workflows/pull-request.md)。
+merge判定の条件は[.ai/workflows/pull-request.md](.ai/workflows/pull-request.md)。
 
 実装前承認は1人、実装後はRisk別の人数を要求する。承認待ちは連続失敗に数えない。
 実装前の仕様曖昧・未決の重要設計はESCALATED。agentが未宣言のHIGH変更を提案した場合も、
@@ -542,7 +541,7 @@ packagesへの変更を含むSBIも常にProduction。本番共有packageの検�
 runのHEADを`refs/harness/runs/<run-id>`で保持するので、レビューとPR Adapterは同じSHAを参照する。
 元リポジトリのHEADが進んだ場合、dirty workspace、検証ソースの変更、入力の変更があれば承認を再利用しない。
 現在のLocal Phaseではresume・merge可否の再判定もroot HEAD==baselineを要求する。
-別PRをpullしただけでも既存runは無効になるため、新しいHEADでrunと承認を作り直す。PRを作ったrunは`harness:reverify <PR URL>`で、実装を保持したまま再検証runを作る（[ADR-0003](docs/adr/0003-reverify-after-main-update.md)）。
+待っている間は元のcheckoutでmainをpullしない。PRのmerge判定はmainが進んでも止まらない（[ADR-0011](docs/adr/0011-no-main-sync-without-conflict.md)）。
 並行run / Factory向けのbase追跡は今後の拡張とする。
 証跡・承認台帳・秘密値・node_modulesはiteration commitに含めない。
 
@@ -559,11 +558,9 @@ cleanで所有関係を確認できたworktreeだけを削除する。証跡・r
 
 Nodeは`.node-version`、pnpmはpackage.jsonのpackageManagerに固定。`pnpm install --frozen-lockfile`後のprepareで
 version管理された`.githooks/pre-push`を設定する。必要なら`pnpm hooks:install`で再設定できる。
-push前にharness:checkを必ず実行し、続けて`harness:push-gate`が、push対象のSHAをdetached worktreeに取り出し、変更したHarnessのモジュールを名指しするテストだけを実行する（working treeの未commit変更は検証対象にならない）。失敗するとpushを止める。
-Verifier、harness:test全件、harness:demoはpre-pushで実行せず、CIに任せる（#288）。
+pre-pushは`harness:check`と変更したHarnessモジュールのテストだけ、PRのCIは変更影響範囲、mainへのpushは全件を実行する。詳細は[.ai/workflows/ci.md](.ai/workflows/ci.md)。
 `--no-verify`は通常手順にしない。
 
-GitHub ActionsはSBIと差分から必要なVerifierを並列実行し、Full Gate対象ならharness:testとharness:demo --fullも実行する。
-最終の品質ゲートはCIの`harness`チェック（Completion Judge）。詳細は[.ai/workflows/ci.md](.ai/workflows/ci.md)。Actionsはcommit SHA固定、読取専用権限、checkout認証情報を保存しない。
+最終の品質ゲートは`Completion Judge`チェック。Actionsはcommit SHA固定、読取専用権限、checkout認証情報を保存しない。
 ローカルhookは回避できるので、mainのRulesetで`Completion Judge`の成功とPR経由を必須にしている（適用済み。[docs/workflows/github-ruleset.md](docs/workflows/github-ruleset.md)）。
 hook・CI・Harnessのどれにもmerge機能はない。

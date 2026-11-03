@@ -189,16 +189,21 @@ describe('Merge Policy Judge with GitHub PR state', () => {
       assert.equal(result.decision, 'BLOCKED');
       assert.ok(result.reasons.includes('github_state_unavailable'));
     });
-    it('when the base branch moved past the run baseline then blocks because the merge result was never verified', () => {
-      const result = decide(2, github({ pullRequest: { remoteBaseSha: old }, reviews: { approvedHumans: ['alice'] } }));
-      assert.equal(result.decision, 'BLOCKED');
-      assert.ok(result.reasons.includes('base_not_baseline'));
-    });
-    it('when the pull request base SHA is not the run baseline then blocks', () => {
-      assert.ok(decide(1, github({ pullRequest: { baseSha: old } })).reasons.includes('base_not_baseline'));
+    // #288: main advancing alone is no reason to sync the PR; the push to main verifies the merged result.
+    it('when the base branch moved past the run baseline then still allows merge, because main advancing alone needs no sync', () => {
+      const result = decide(2, github({ pullRequest: { baseSha: old, remoteBaseSha: old }, reviews: { approvedHumans: ['alice'] } }));
+      assert.equal(result.decision, 'MERGE_ALLOWED');
     });
     it('when the pull request targets another base branch then blocks', () => {
-      assert.ok(decide(1, github({ pullRequest: { baseRef: 'develop' } })).reasons.includes('base_not_baseline'));
+      assert.ok(decide(1, github({ pullRequest: { baseRef: 'develop' } })).reasons.includes('base_branch_mismatch'));
+    });
+    it('when GitHub reports a merge conflict with the base then blocks until the conflict is resolved', () => {
+      const result = decide(1, github({ pullRequest: { mergeable: false } }));
+      assert.equal(result.decision, 'BLOCKED');
+      assert.ok(result.reasons.includes('merge_conflict'));
+    });
+    it('when GitHub has not computed mergeability yet then does not block on it', () => {
+      assert.equal(decide(1, github({ pullRequest: { mergeable: null } })).decision, 'MERGE_ALLOWED');
     });
     it('when the head SHA differs but the state claims it matches then still blocks', () => {
       assert.equal(decide(1, github({ pullRequest: { headSha: old, testedShaMatches: true } })).decision, 'BLOCKED');
@@ -405,15 +410,24 @@ describe('GitHub PR Adapter', () => {
       await reviewBy(github, pullRequest.number, 'alice', 'APPROVED', run.headSha);
       assert.equal((await resumeRun({ root, runId: run.id, quiet: true })).status, 'WAITING_FOR_HUMAN_REVIEW');
     })));
-    it('when origin/main moves after the PR was opened then resume blocks even with CI and approval, until the run is recreated', () => fixture(root => withIssue(root, sbiIssue(), async ({ github }) => {
+    it('when origin/main moves after the PR was opened then resume still allows merge with CI and approval, without re-verification', () => fixture(root => withIssue(root, sbiIssue(), async ({ github }) => {
       const run = await issueRun(root);
       const { pullRequest } = await openPullRequest({ root, runId: run.id, quiet: true });
       await succeed(github, run.headSha);
       await reviewBy(github, pullRequest.number, 'alice', 'APPROVED', run.headSha);
       await advanceMain(root, run.baselineSha);
       const resumed = await resumeRun({ root, runId: run.id, quiet: true });
+      assert.equal(resumed.status, 'MERGE_ALLOWED');
+    })));
+    it('when GitHub reports the PR conflicts with origin/main then resume blocks on the conflict', () => fixture(root => withIssue(root, sbiIssue(), async ({ github }) => {
+      const run = await issueRun(root);
+      const { pullRequest } = await openPullRequest({ root, runId: run.id, quiet: true });
+      await succeed(github, run.headSha);
+      await reviewBy(github, pullRequest.number, 'alice', 'APPROVED', run.headSha);
+      await github.update(s => { s.pulls.find(p => p.number === pullRequest.number).mergeable = false; });
+      const resumed = await resumeRun({ root, runId: run.id, quiet: true });
       assert.equal(resumed.status, 'BLOCKED');
-      assert.ok(resumed.merge.reasons.includes('base_not_baseline'));
+      assert.ok(resumed.merge.reasons.includes('merge_conflict'));
     })));
     it('when a local merge approval is attempted in PR mode then refuses it in favour of GitHub Review', () => fixture(root => withIssue(root, sbiIssue(), async () => {
       const run = await issueRun(root);
@@ -728,10 +742,26 @@ describe('GitHub PR Adapter', () => {
       assert.equal(await remoteSha(bare, `harness/${run.id}`), '');
       assert.deepEqual((await github.state()).pulls, []);
     }, { publishBaseline: false })));
-    it('when origin/main moved past the run baseline then refuses before pushing because the merge result was never verified', () => fixture(root => withIssue(root, sbiIssue(), async ({ bare, github }) => {
+    it('when origin/main moved past the run baseline without a conflict then still opens the PR at the tested SHA', () => fixture(root => withIssue(root, sbiIssue(), async ({ bare, github }) => {
       const run = await issueRun(root);
       await advanceMain(root, run.baselineSha);
-      await assert.rejects(openPullRequest({ root, runId: run.id, quiet: true }), /origin\/main/);
+      await openPullRequest({ root, runId: run.id, quiet: true });
+      assert.equal(await remoteSha(bare, `harness/${run.id}`), run.headSha);
+      assert.equal((await github.state()).pulls.length, 1);
+    })));
+    it('when origin/main changed the same lines as the run then refuses before pushing and names the conflict', () => fixture(root => withIssue(root, sbiIssue(), async ({ bare, github }) => {
+      const run = await issueRun(root);
+      const other = await mkdtemp(join(tmpdir(), 'sonomama-main-'));
+      try {
+        await git(root, ['worktree', 'add', '--detach', join(other, 'tree'), run.baselineSha]);
+        await mkdir(join(other, 'tree', home, '..'), { recursive: true });
+        await writeFile(join(other, 'tree', home), '別のホーム');
+        await git(join(other, 'tree'), ['add', home]);
+        await git(join(other, 'tree'), ['commit', '-m', 'someone else changed the home']);
+        await git(join(other, 'tree'), ['push', '--quiet', 'origin', 'HEAD:refs/heads/main']);
+        await git(root, ['worktree', 'remove', join(other, 'tree')]);
+      } finally { await rm(other, { recursive: true, force: true }); }
+      await assert.rejects(openPullRequest({ root, runId: run.id, quiet: true }), /conflict/);
       assert.equal(await remoteSha(bare, `harness/${run.id}`), '');
       assert.deepEqual((await github.state()).pulls, []);
     })));

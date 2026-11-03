@@ -483,7 +483,7 @@ async function publishProtected({ root, runId, quiet = false, github = githubPrC
     const { remote, base } = inputs.config.github;
     const repository = await github.repository(root, remote);
     if (summary.pullRequest && summary.pullRequest.repository !== repository.name) throw new Error(`run is bound to ${summary.pullRequest.repository}, not ${repository.name}`);
-    await github.assertBaseIsBaseline(root, { remote, base, baselineSha: summary.baselineSha });
+    await github.assertMergesIntoBase(root, { remote, base, baselineSha: summary.baselineSha, headSha: summary.headSha });
     const files = await changedFiles(workspace, summary.baselineSha, summary.headSha);
     if (files.some(f => isSecretPath(f.path) || hasSecret(f.added))) throw new Error('changed files contain sensitive material; refusing to push');
     const body = pullRequestBody({ summary, sbi: inputs.sbi });

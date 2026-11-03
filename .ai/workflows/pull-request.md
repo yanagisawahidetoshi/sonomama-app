@@ -6,11 +6,11 @@ Harnessが出すのは`MERGE_ALLOWED`まで。mergeは人間がGitHubで行う�
 ```text
 harness:run → executionStatus=DONE
   → Harnessが続けてPRを作成（`harness:pr --run RUN_ID`は障害復旧用。ゲート待ちのrunは`harness:approve`の後に作成）
-      origin/main の先頭が run baseline と一致するか確認 → 差分とPR本文の秘密値を検査
+      origin/main が run baseline を含み、tested SHA と conflict しないか確認 → 差分とPR本文の秘密値を検査
       → tested SHAを harness/<run-id> にpush（force pushしない）→ PRを作成（同じbase向けの既存open PRがあれば再利用）
   → GitHub上で CI と Review
   → pnpm harness:resume --run RUN_ID（保守用。実行のたびにGitHubから取り直して判定）
-      PR open かつ base = run baseline かつ tested SHA = PR HEAD SHA かつ 必須CI PASS
+      PR open かつ base branch = github.base かつ conflict なし かつ tested SHA = PR HEAD SHA かつ 必須CI PASS
       かつ CHANGES_REQUESTEDなし かつ Riskごとの人数のApproveあり → MERGE_ALLOWED
 ```
 
@@ -26,10 +26,9 @@ harness:run → executionStatus=DONE
 ## 判定
 
 - **PR**: closeまたはmergeされていればBLOCKED。Harnessが`MERGED`を生成することはない。
-- **base**: PRのbase branchが`github.base`で、PRのbase SHAとそのbranchの現在の先頭がどちらもrunのbaselineのときだけ進む。違えばBLOCKED（`base_not_baseline`）。
-  baseがbaselineのままなら、mergeの結果はtested SHAと同じコードになる。mainが進んだら、`harness:reverify`で再検証する（下記）。
-  PRのbase SHAはmainの更新に追従しない場合があるため、現在のbranchの先頭も`git ls-remote`で確かめる。
-  これはRulesetの`strict_required_status_checks_policy`より強い条件なので、その設定は読まない。
+- **base**: PRのbase branchが`github.base`でなければBLOCKED（`base_branch_mismatch`）。mainが進んだだけでは止めない（[ADR-0011](../../docs/adr/0011-no-main-sync-without-conflict.md)）。
+  GitHubがbaseとのconflictを報告していればBLOCKED（`merge_conflict`）。PR branchでconflictを解消してpushし、新しいHEADを検証し直す。
+  merge結果の検証は、merge後のmainへのpush（CIの`--all`）が受け持つ。
 - **SHA**: PR HEADがtested SHAと違えばBLOCKED（`tested_sha_mismatch`）。PRへ追加pushした場合は、新しいrunで検証し直す。
 - **CI**: 必須checkは、`.harness/config/harness.json`の`github.requiredChecks`と、base branchのRulesetにあるrequired status checksの和集合。
   Rulesetのcheckに`integration_id`があれば、そのGitHub Appが報告したcheck runだけを数える。同じ名前でも別のAppのcheckは数えない。
@@ -46,9 +45,9 @@ harness:run → executionStatus=DONE
 
 `github-state.json`は、判定に使ったGitHubの状態の要約（PR・CI・Review）。正本はGitHub。APIのレスポンスそのものは保存しない。
 
-## mainが進んだPRの再検証（`harness:reverify`）
+## 最新のmainと統合して検証し直す（`harness:reverify`、必要なときだけ）
 
-他のPRがmergeされて`base_not_baseline`になったPRは、実装を作り直さずに再検証する（[ADR-0003](../../docs/adr/0003-reverify-after-main-update.md)）。
+通常のフローでは使わない。mainが進んでもmergeは止まらない（ADR-0011）。最新のmainと統合したcommitをPRに載せて検証したいときだけ、実装を作り直さずに再検証する（[ADR-0003](../../docs/adr/0003-reverify-after-main-update.md)）。
 
 ```text
 元checkoutで最新のmainをpull（HEAD = origin/main の先頭 = 新baseline）
@@ -80,7 +79,7 @@ EvidenceはHarnessを実行したPCの`.harness/runs/<run-id>/`にあり、PRに
 
 ## 制約
 
-- `harness:resume`は、元のcheckoutのHEADがrunのbaselineのままの間だけ動く（既存の`sourceIntegrity`）。待っている間に別のPRをpullしてHEADが動いたら、`harness:reverify`で新しいrunを作る。
+- `harness:resume`は、元のcheckoutのHEADがrunのbaselineのままの間だけ動く（既存の`sourceIntegrity`）。待っている間は元のcheckoutでmainをpullしない。判定はGitHub上のCIとReviewでも確かめられる。
 - 実装Agent（codex / claude CLI）が人間と同じ`gh`の認証で動くと、人間名義でReviewできてしまう。Harnessではこれを検出できない。Agentを動かす環境には、GitHubの認証情報を渡さない。
 - `harness:pr`のpushは、リポジトリのpre-push hookを通さない。hookが検査するのは操作者のcheckoutで、pushするcommitではないため。pushするcommitは、Harnessが検証したSHAそのもの。
 - GitHub上のbranch protectionとRulesetは変更しない。mainのRulesetは人が適用する（[docs/workflows/github-ruleset.md](../../docs/workflows/github-ruleset.md)）。

@@ -143,7 +143,7 @@ try {
     if (command === 'impact') {
       const { impact } = await loadImpact({ root, base, all });
       for (const line of describeImpact(impact)) console.log(redactText(line));
-      await output([`required_verifiers=${JSON.stringify(impact.requiredVerifiers)}`, `full_gate=${impact.fullGate}`, `maestro=${JSON.stringify(impact.maestro)}`, `head_sha=${(await git(root, ['rev-parse', 'HEAD'])).stdout.trim()}`]);
+      await output([`required_verifiers=${JSON.stringify(impact.requiredVerifiers)}`, `full_gate=${impact.fullGate}`, `harness_tests=${JSON.stringify(impact.harnessTests)}`, `maestro=${JSON.stringify(impact.maestro)}`, `head_sha=${(await git(root, ['rev-parse', 'HEAD'])).stdout.trim()}`]);
     } else if (command === 'verify') {
       if (!options['--verifier']) throw new Error('verify requires --verifier ID');
       process.exitCode = await printVerifier({ base, all, id: options['--verifier'] }) ? 0 : 1;

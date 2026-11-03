@@ -12,7 +12,7 @@ mainへの変更は、PRを通し、`Completion Judge`チェックが成功し�
 | `Completion Judge`チェックが成功していないPRのmergeを止める | GitHub Ruleset |
 | `Completion Judge`チェックの中身（変更範囲に応じた検証、Trusted Acceptance、Completion Judge） | CI上のHarness（[.ai/workflows/ci.md](../../.ai/workflows/ci.md)） |
 | リスクのレベル（1〜3）と、必要なレビュー人数（0人、1人、別々の2人以上） | Harness |
-| 検証したcommitとPRの先頭が一致しているか、mainが進んでいないか、修正依頼が残っていないか | Harness（`pnpm harness:resume`） |
+| 検証したcommitとPRの先頭が一致しているか、baseとconflictしていないか、修正依頼が残っていないか | Harness（`pnpm harness:resume`） |
 | 実際のmerge | 人 |
 
 GitHubはHarnessのMERGE_ALLOWEDを参照しない。Rulesetで止められるのは「PRを通していない」「`Completion Judge`が成功していない」の2つだけで、レビュー人数が足りないPRでもGitHub上ではmergeできる。mergeする人は、`pnpm harness:resume --run RUN_ID`でMERGE_ALLOWEDを確かめてからmergeする。Harnessの判定条件は[.ai/workflows/pull-request.md](../../.ai/workflows/pull-request.md)にある。
@@ -26,7 +26,7 @@ GitHubはHarnessのMERGE_ALLOWEDを参照しない。Rulesetで止められる�
 | non_fast_forward | 有効 | force pushで履歴を書き換えられないようにする |
 | pull_request | 必要な承認は0人 | mainへの直接pushを止め、PR経由だけにする。人数は下の表のとおりHarnessに任せる |
 | required_status_checks | `Completion Judge`（GitHub Actions、`integration_id: 15368`） | mainのHarnessで判定するCompletion Judge（ADR-0008）が成功したPRだけmergeできるようにする |
-| strict_required_status_checks_policy | 無効 | mainが進んだだけでPRへのmain取り込みとCIの再実行を求めない（#288）。conflictが出たときだけ取り込む。merge後のmainへのpushで全量を検証する。Harness runは、mainの先頭がrunのbaselineと一致することを自分で確かめる |
+| strict_required_status_checks_policy | 無効 | mainが進んだだけでPRへのmain取り込みとCIの再実行を求めない（#288）。conflictが出たときだけ取り込む。merge後のmainへのpushで全量を検証する。Harnessも、mainの先頭がrunのbaselineと一致することは求めない（[ADR-0011](../adr/0011-no-main-sync-without-conflict.md)） |
 | bypass_actors | なし | 管理者も含めて例外を作らない。緊急時の扱いは下に書く |
 
 `Completion Judge`は`.github/workflows/completion-judge.yml`の`publish` jobが作るcheck runの名前。この名前を変えると、Rulesetの必須チェックと一致しなくなり、どのPRもmergeできなくなる。`integration_id`を指定しているので、GitHub Actions以外のGitHub Appが同じ名前のcheckを報告しても、必須チェックを満たしたことにはならない。Harnessも、Rulesetの必須チェックと`integration_id`を読んで判定に加える。
