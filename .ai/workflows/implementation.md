@@ -44,7 +44,7 @@ Verifierは差分のappliesToとlaneで選び、AC・Security・明示必須指�
 Prototypeはprototypes/web・mobileのダミーデータ画面で、typecheck/lint/format/build/secret検査。
 Productionはapps・packages。試作から本番へ採用するときは新しいProduction SBIにpromotion.sourceを指定し、
 通常のSBIと同じくapps実装、本番検証、Merge Approvalへ進む（Design Approval Gateは無い）。Security影響はlaneより常に優先。
-詳しい設定例と承認・cleanup手順はルートのREADMEに記載する。
+詳しい設定例と承認・cleanup手順は[harness-reference.md](../harness-reference.md)に記載する。
 
 ## SBIとacceptance verifier
 
