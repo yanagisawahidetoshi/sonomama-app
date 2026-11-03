@@ -61,12 +61,20 @@ try {
       const result = await verify({ root, workspace: root, config: config(), sbi: sbi([]), files: files(paths.api), only: new Set(['api-contract']), selected: new Map([['api-contract', true]]) });
       assert.notEqual(result.status, 'PASS');
     }],
-    ['CI-AC-15', 'Given a Harness change, When analysing, Then the Full Gate runs harness:test and the self-repair demo', () => {
-      for (const path of ['tools/harness/verifier.mjs', '.harness/config/harness.json', '.harness/verification/admin-env.mjs', '.harness/rules/pr-risk.json']) {
+    ['CI-AC-15', 'Given a Harness change, When CI runs, Then a pull request runs the affected Harness tests and a push to main runs every Harness test', () => {
+      for (const path of ['tools/harness/verifier.mjs', '.harness/verification/admin-env.mjs']) {
+        const impact = analyzeImpact({ config: config(), sbis: [], files: files(path) });
+        assert.equal(impact.fullGate, false, path);
+        assert.deepEqual(impact.harnessModules, [path]);
+      }
+      for (const path of ['.harness/config/harness.json', '.harness/rules/pr-risk.json']) {
         assert.equal(analyzeImpact({ config: config(), sbis: [], files: files(path) }).fullGate, true, path);
       }
-      assert.match(job('harness-test'), /full_gate == 'true'/);
+      assert.equal(analyzeImpact({ config: config(), sbis: [], files: [], all: true }).fullGate, true);
+      assert.match(workflow(), /HARNESS_SCOPE: \$\{\{ github\.event_name == 'pull_request' && format\('--base origin\/\{0\}', github\.base_ref\) \|\| '--all' \}\}/);
+      assert.match(job('harness-test'), /full_gate == 'true' \|\| needs\.impact\.outputs\.harness_tests != '\[\]'/);
       assert.match(job('harness-test'), /pnpm harness:test/);
+      assert.match(job('harness-test'), /HARNESS_TESTS: \$\{\{ needs\.impact\.outputs\.full_gate != 'true' && join\(fromJson\(needs\.impact\.outputs\.harness_tests\), ' '\) \|\| '' \}\}/);
       assert.match(job('harness-demo'), /full_gate == 'true'/);
       assert.match(job('harness-demo'), /pnpm harness:demo \$HARNESS_DEMO_SCOPE/);
       assert.match(workflow(), /HARNESS_DEMO_SCOPE: \$\{\{ github\.event_name != 'pull_request' && '--full' \|\| '' \}\}/);
