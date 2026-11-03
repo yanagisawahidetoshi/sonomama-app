@@ -115,6 +115,11 @@ export const configSchema = z.strictObject({
     fullGate: z.array(text).default([]),
     toolchain: z.array(text).default([]),
   }).default({ crossLayer: [], fullGate: [], toolchain: [] }),
+  // #300: Harness tests that run whole Harness flows, each with the modules it is responsible for. CI runs one only when it or an owner
+  // changes, pre-push never, a push to main always. Every other Harness test is a unit test, selected by the modules it names.
+  harnessTests: z.strictObject({
+    integration: z.record(relativePath.regex(/\.test\.mjs$/), z.array(relativePath.regex(/(?<!\.test)\.mjs$/)).min(1)).default({}),
+  }).default({ integration: {} }),
 }).refine(c => new Set(c.verifiers.map(v => v.id)).size === c.verifiers.length && !c.verifiers.some(v => v.id === 'sample-bdd'), 'duplicate or reserved verifier');
 // Migration and ADR left the Human Gate with #157: an ordinary schema change or an ADR needs one review, not two humans before implementation.
 export const rulesSchema = z.strictObject({

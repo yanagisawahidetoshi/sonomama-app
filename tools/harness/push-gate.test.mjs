@@ -144,6 +144,17 @@ describe('Push gate execution',()=>{
       const result=await gate(root,await branch(root,module),{passes:false});
       assert.equal(result.passed,false);
     }));
+    // #300: an integration test runs whole Harness flows; pre-push leaves it to CI even when the module it owns changes.
+    it('when the module an integration test owns changes then runs the unit tests naming it and leaves the integration test to CI',()=>fixture(async root=>{
+      const integration={[`tools/harness/${light}-flow.test.mjs`]:[`tools/harness/${light}.mjs`]};
+      const config=JSON.parse(await readFile(join(root,'.harness/config/harness.json'),'utf8'));
+      await writeFile(join(root,'.harness/config/harness.json'),JSON.stringify({...config,harnessTests:{integration}},null,2));
+      await writeFile(join(root,`tools/harness/${light}-flow.test.mjs`),`import { light } from './${light}.mjs';\nimport './test-fixture.mjs';\n`);
+      await commitFixture(root);
+      const result=await gate(root,await branch(root,module));
+      assert.deepEqual(result.ran,[`tools/harness/${light}.test.mjs`]);
+      assert.equal(result.passed,true);
+    }));
   });
   describe('given a change that only CI can narrow',()=>{
     for (const path of ['.harness/config/lanes.json','.github/workflows/harness.yml','.githooks/pre-push','.node-version']) {

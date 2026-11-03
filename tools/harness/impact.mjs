@@ -176,7 +176,7 @@ export async function loadImpact({ root, workspace = root, base, all = false }) 
   const connected = new Set(config.securityVerifiers.filter(v => v.commands.length).map(v => v.id));
   const securityVerifiers = assessSecurity({ files, sbis, snapshots, policy }).requiredVerifiers.filter(id => connected.has(id));
   const impact = analyzeImpact({ config, sbis, runSbis: snapshots.map(s => s.snapshot.sbi), files, all, securityVerifiers });
-  impact.harnessTests = impact.fullGate ? [] : (await selectHarnessTests({ root: workspace, config, files })).tests;
+  impact.harnessTests = impact.fullGate ? [] : (await selectHarnessTests({ root: workspace, config, files, stage: 'ci' })).tests;
   return { config, files, sbis, snapshots, impact };
 }
 

@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { access, readdir, readFile } from 'node:fs/promises';
 import { join, posix } from 'node:path';
 // #288: the Harness tests a change needs before push. A test is selected when it is changed or names a changed module, imported or run
 // as a path; a module it reaches only through another module does not select it (test-fixture.mjs reaches nearly all of them).
@@ -27,11 +27,24 @@ export function classifyHarnessChange({ config, files }) {
   return { all: reasons.length > 0, modules, reasons };
 }
 
-export async function selectHarnessTests({ root, config, files }) {
+const exists = path => access(path).then(() => true, () => false);
+
+// #300: a unit test is selected by the modules it names; an integration test by itself and the modules it owns, so a shared module
+// (io.mjs, index.mjs, workspace.mjs) no longer pulls in every whole-flow test. pre-push runs no integration test; CI runs the selected ones.
+export async function selectHarnessTests({ root, config, files, stage = 'ci' }) {
   const { all, modules, reasons } = classifyHarnessChange({ config, files });
+  const integration = config.harnessTests?.integration ?? {};
+  // A stale declaration fails closed: a renamed test or owner would otherwise leave its flow untested until main.
+  const missing = [];
+  for (const path of new Set(Object.entries(integration).flat(2))) if (!await exists(join(root, path))) missing.push(path);
+  if (missing.length) throw new Error(`Harness integration tests declared in .harness/config/harness.json do not exist: ${missing.join(', ')}`);
   if (all || !modules.length) return { all, tests: [], reasons };
   const changed = new Set(modules), tests = [];
   for (const test of await testFiles(root)) {
+    if (integration[test]) {
+      if (stage !== 'pre-push' && (changed.has(test) || integration[test].some(owner => changed.has(owner)))) tests.push(test);
+      continue;
+    }
     const dir = posix.dirname(test);
     const names = [...(await readFile(join(root, test), 'utf8')).matchAll(named)].flatMap(([, name]) => [posix.join(dir, name), posix.normalize(name)]);
     if (changed.has(test) || names.some(name => changed.has(name))) tests.push(test);

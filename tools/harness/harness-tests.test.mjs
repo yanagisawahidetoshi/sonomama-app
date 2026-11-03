@@ -1,9 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { selectHarnessTests } from './harness-tests.mjs';
+import { configSchema } from './schemas.mjs';
 
 // #288: pre-push runs only the Harness tests that name a changed Harness module; what it cannot narrow is left to CI, never run in full.
 const config = { impact: { fullGate: ['^tools/harness/', '^\\.harness/(config|verification|rules|skills)/', '^\\.github/', '^\\.githooks/', '^AGENTS\\.md$'], toolchain: ['^\\.node-version$', '^package\\.json$'] } };
@@ -22,10 +23,10 @@ const sources = {
   '.harness/verification/lib/assert.mjs': 'export {};\n',
   '.harness/verification/lib/assert.test.mjs': "import './assert.mjs';\n",
 };
-async function repository(fn) {
+async function repository(fn, extra = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'sonomama-harness-tests-')));
   try {
-    for (const [path, text] of Object.entries(sources)) { await mkdir(join(root, path, '..'), { recursive: true }); await writeFile(join(root, path), text); }
+    for (const [path, text] of Object.entries({ ...sources, ...extra })) { await mkdir(join(root, path, '..'), { recursive: true }); await writeFile(join(root, path), text); }
     await fn(root);
   } finally { await rm(root, { recursive: true, force: true }); }
 }
@@ -72,5 +73,56 @@ describe('Harness test selection', () => {
     it('when only applications and documents change then selects no Harness test', () => repository(async root => {
       assert.deepEqual(await select(root, 'apps/admin/src/main.ts', 'docs/architecture/README.md'), { all: false, tests: [], reasons: [] });
     }));
+  });
+});
+
+// #300: an integration test runs whole Harness flows, so it is chosen by the modules it is responsible for, never by what it imports.
+// pre-push runs no integration test; CI runs the ones whose test or owner changed; a push to main runs every test.
+describe('Harness test selection by stage', () => {
+  const staged = { ...config, harnessTests: { integration: { 'tools/harness/flow.test.mjs': ['tools/harness/flow.mjs'] } } };
+  const flow = { 'tools/harness/flow.mjs': "import './io.mjs';\n", 'tools/harness/flow.test.mjs': "import './io.mjs';\nimport './flow.mjs';\nimport './verifier.mjs';\n" };
+  const selectIn = (stage, root, ...paths) => selectHarnessTests({ root, config: staged, files: paths.map(path => ({ path })), stage });
+  describe('given an integration test declared with the module it owns', () => {
+    it('when a shared module it only imports changes then CI selects the unit tests naming that module but not the integration test', () => repository(async root => {
+      assert.deepEqual((await selectIn('ci', root, 'tools/harness/io.mjs')).tests, ['tools/harness/agents/provider.test.mjs', 'tools/harness/io.test.mjs']);
+    }, flow));
+    it('when another module it imports changes then CI does not select it', () => repository(async root => {
+      assert.deepEqual((await selectIn('ci', root, 'tools/harness/verifier.mjs')).tests, ['tools/harness/verifier.test.mjs']);
+    }, flow));
+    it('when its owner module changes then CI selects it', () => repository(async root => {
+      assert.deepEqual((await selectIn('ci', root, 'tools/harness/flow.mjs')).tests, ['tools/harness/flow.test.mjs']);
+    }, flow));
+    it('when the integration test itself changes then CI selects it', () => repository(async root => {
+      assert.deepEqual((await selectIn('ci', root, 'tools/harness/flow.test.mjs')).tests, ['tools/harness/flow.test.mjs']);
+    }, flow));
+    it('when no stage is given then it is selected as CI selects it', () => repository(async root => {
+      assert.deepEqual((await selectHarnessTests({ root, config: staged, files: [{ path: 'tools/harness/flow.mjs' }] })).tests, ['tools/harness/flow.test.mjs']);
+    }, flow));
+    it('when its owner module changes before push then pre-push leaves it to CI', () => repository(async root => {
+      assert.deepEqual(await selectIn('pre-push', root, 'tools/harness/flow.mjs'), { all: false, tests: [], reasons: [] });
+    }, flow));
+    it('when the integration test itself changes before push then pre-push leaves it to CI', () => repository(async root => {
+      assert.deepEqual((await selectIn('pre-push', root, 'tools/harness/flow.test.mjs', 'tools/harness/io.mjs')).tests, ['tools/harness/agents/provider.test.mjs', 'tools/harness/io.test.mjs']);
+    }, flow));
+  });
+  describe('given a declaration that no longer matches the tree', () => {
+    it('when a declared integration test does not exist then selection fails naming it, so its owners are never silently untested', () => repository(async root => {
+      const stale = { ...config, harnessTests: { integration: { 'tools/harness/gone.test.mjs': ['tools/harness/io.mjs'] } } };
+      await assert.rejects(selectHarnessTests({ root, config: stale, files: [{ path: 'tools/harness/io.mjs' }] }), /tools\/harness\/gone\.test\.mjs/);
+    }));
+    it('when a declared owner module does not exist then selection fails naming it', () => repository(async root => {
+      const stale = { ...config, harnessTests: { integration: { 'tools/harness/flow.test.mjs': ['tools/harness/renamed.mjs'] } } };
+      await assert.rejects(selectHarnessTests({ root, config: stale, files: [{ path: 'tools/harness/io.mjs' }], stage: 'pre-push' }), /tools\/harness\/renamed\.mjs/);
+    }, flow));
+  });
+  describe('given the repository configuration', () => {
+    it('when its integration tests are read then every declared test and owner exists and each test runs a whole Harness flow', async () => {
+      const root = new URL('../../', import.meta.url).pathname;
+      const repo = configSchema.parse(JSON.parse(await readFile(join(root, '.harness/config/harness.json'), 'utf8')));
+      const declared = Object.entries(repo.harnessTests.integration);
+      assert.ok(declared.length > 0);
+      await selectHarnessTests({ root, config: repo, files: [{ path: 'tools/harness/io.mjs' }] });
+      for (const [test] of declared) assert.match(await readFile(join(root, test), 'utf8'), /test-fixture\.mjs/, `${test} uses no Harness fixture`);
+    });
   });
 });

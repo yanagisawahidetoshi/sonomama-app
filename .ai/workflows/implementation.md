@@ -33,7 +33,7 @@ PBI → SBI Plannerは[pbi-sbi-planner.md](pbi-sbi-planner.md)。API変更はSch
 1. Nodeは.node-version、pnpmはpackageManagerの版を使う。
 2. pnpm install --frozen-lockfileで依存とpre-push hookを準備する。再設定はpnpm hooks:install。
 3. BDDテストを先に書き、失敗確認・テストcommit後に実装する。
-4. pre-pushは`harness:check`と、変更したHarnessモジュールを名指しするテストだけを実行する。Verifier・harness:test全件・demoは実行しない。
+4. pre-pushは`harness:check`と、変更したHarnessモジュールを名指しするunitテストだけを実行する。integrationテストはCIに任せる。Verifier・harness:test全件・demoは実行しない。
 5. PRのCIは変更影響範囲のテストとVerifierを実行し、mainへのpushで全件を実行する（[ci.md](ci.md)）。
 6. 元リポジトリのHEADを変える前にrunをレビューする。変更後は承認を再利用せず、新規runで再検証する。
 7. 人間が最終mergeする。HarnessはMERGE_ALLOWED判定まで。mainのRulesetは適用済みで、PR経由と`Completion Judge`の成功を必須にしている（[github-ruleset.md](../../docs/workflows/github-ruleset.md)）。
