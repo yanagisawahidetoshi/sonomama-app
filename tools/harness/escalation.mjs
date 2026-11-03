@@ -4,7 +4,9 @@ export const escalationCodes = Object.freeze(['SPEC_AMBIGUOUS', 'DESIGN_DECISION
   'SOURCE_DIRTY', 'SOURCE_CHANGED', 'WORKSPACE_CHANGED', 'APPROVAL_INVALID', 'SECURITY_CHECKS_CHANGED', 'REVERIFY_CONFLICT',
   // #147: generated Trusted Acceptance that failed the quality checks, detection (G) whose tests missed a controlled violation or could not
   // be judged, and generated specs that could not run at all (environment).
-  'ACCEPTANCE_REJECTED', 'DETECTION_FAILED', 'DETECTION_UNDETERMINABLE', 'ACCEPTANCE_RUN_FAILED', 'UNKNOWN']);
+  'ACCEPTANCE_REJECTED', 'DETECTION_FAILED', 'DETECTION_UNDETERMINABLE', 'ACCEPTANCE_RUN_FAILED',
+  // #277: a provider (Claude / Codex) call ran out of providerTimeoutMs.
+  'PROVIDER_TIMEOUT', 'UNKNOWN']);
 // A decision the approved SBI cannot settle (#175): the human decides, updates the SBI, approves it again and starts a new run.
 // The others are failures a human investigates (environment, configuration, tampering, repeated failures).
 const humanDecisionCodes = new Set(['SPEC_AMBIGUOUS', 'DESIGN_DECISION_REQUIRED', 'AGENT_ESCALATION', 'NEW_SECURITY_SCOPE', 'NEW_HIGH_RISK', 'SCOPE_VIOLATION', 'LANE_ESCALATION']);
@@ -16,6 +18,7 @@ export function classifyEscalation(message) {
   if (/^HEAD\/snapshot changed|^workspace snapshot changed|^Verifier mutated|not an owned Git worktree|^Run workspace was cleaned/.test(text)) return 'WORKSPACE_CHANGED';
   if (/^Source must be clean|^input snapshot changed|snapshot changed; start a new run|^trusted tool\/skill snapshot changed/.test(text)) return 'SOURCE_CHANGED';
   if (/signature invalid/.test(text)) return 'APPROVAL_INVALID';
+  if (/(^|: )(claude|codex): timeout$/.test(text)) return 'PROVIDER_TIMEOUT';
   if (/^Required security checks changed/.test(text)) return 'SECURITY_CHECKS_CHANGED';
   return 'UNKNOWN';
 }

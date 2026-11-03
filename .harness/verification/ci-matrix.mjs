@@ -58,7 +58,9 @@ try {
       assert.match(job('harness'), /harness:judge/);
     }],
     ['CI-AC-14', 'Given a required verifier, When its app is missing or unconfigured, Then the result is not PASS', async () => {
-      const result = await verify({ root, workspace: root, config: config(), sbi: sbi([]), files: files(paths.api), only: new Set(['api-contract']), selected: new Map([['api-contract', true]]) });
+      // The repository now has an OpenAPI contract (SBI-232), so the required verifier is pointed at an app that does not exist.
+      const unconfigured = { ...config(), verifiers: config().verifiers.map(v => v.id === 'api-contract' ? { ...v, directory: 'packages/missing-api-schema' } : v) };
+      const result = await verify({ root, workspace: root, config: unconfigured, sbi: sbi([]), files: files(paths.api), only: new Set(['api-contract']), selected: new Map([['api-contract', true]]) });
       assert.notEqual(result.status, 'PASS');
     }],
     ['CI-AC-15', 'Given a Harness change, When CI runs, Then a pull request runs the affected Harness tests and a push to main runs every Harness test', () => {
