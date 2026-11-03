@@ -5,6 +5,7 @@
 - 改訂: Accepted（PR #195 のマージで承認。2026-10-31、#175・#193の決定に合わせて実装前Gateの記述を改めた）
 - 判断者: 柳沢英俊
 - 関連SBI: Issue #15（GitHub PR Adapter）
+- Superseded by: [ADR-0011](0011-no-main-sync-without-conflict.md)（Proposed）が、mainが進んだだけでBLOCKEDにする部分を置き換える
 
 ## 背景
 
