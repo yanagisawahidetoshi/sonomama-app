@@ -89,6 +89,7 @@ export async function inspectViolation({ workspace, proposal }) {
   if (proposal.files.length > violationLimits.files) add('(proposal)', `changes ${proposal.files.length} files; at most ${violationLimits.files} files`);
   if (new Set(proposal.files.map(f => f.path)).size !== proposal.files.length) add('(proposal)', 'the same path is named more than once');
   for (const file of proposal.files) {
+    if (isSecretPath(file.path)) { add(file.path, 'is a prohibited secret path'); continue; }
     if (!relativePath.safeParse(file.path).success || !applicationCode.test(file.path) || isGeneratedAcceptanceInput(file.path)) { add(file.path, 'is not application code under apps/api/app/'); continue; }
     if (await throughSymlink(workspace, file.path)) { add(file.path, 'would be written through a symlink'); continue; }
     const before = await readFile(join(workspace, file.path), 'utf8').catch(() => null);
