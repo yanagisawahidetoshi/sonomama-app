@@ -216,6 +216,9 @@ authn-test（apps/api/spec/authentication）、rails-rls-test（apps/api/spec/rl
 どのverifierも合否は実行結果の件数（RSpecのJSON集計、Vitest・JestのJSON report）で決め、0件・pending・todo・失敗・絞り込みで実行されなかったテストがあればFAIL。skip等の静的な検査は補助（`it.fails`・`test.failing`は静的に禁止）。
 
 verifierは`setupCommands`（依存のinstall）と`commands`（検証本体）の2段で動き、時間の上限を別にする（#246）。setupの上限は`setupTimeoutMs`（既定360秒）、検証本体は`timeoutMs`（120秒）で、verifierごとに上書きできる。
+pnpmで依存を入れるコンテナverifierは、run間で共有するpnpm store（Docker volume `sonomama-harness-pnpm-store-<image tag>`）からofflineでinstallする（#272、`dependencyStore: "pnpm"`）。
+storeへ書き込むのはsetupの最初に信頼側のコンテナで走る`pnpm fetch --ignore-pnpmfile --ignore-scripts`だけで、lockfileと`pnpm-workspace.yaml`の写しだけを見る。integrityの無いパッケージがlockfileにあればfetchせずSETUP_FAILED。
+verifierコンテナはstoreをread-onlyでmountし、`pnpm install --frozen-lockfile --offline`はstoreに無い依存があればSETUP_FAILEDになる。volumeはHarnessが消さない。作り直すときは`docker volume rm`で消す。
 setupが時間切れならSETUP_TIMEOUT、失敗ならSETUP_FAILEDとして検証本体を実行せずにFAILにする。検証本体の失敗はVERIFY_FAILED・VERIFY_TIMEOUT。どれもPASSにはしない。証跡のcheckには`failure`と各フェーズの所要時間（`phases`）を残し、ログにも`[setup 139.8s, verify 19.0s]`の形で出す。
 SBIが宣言・記述したruleでも、必須にするのは変更パスがappliesToに当たるverifierだけ（ruleのLEVEL 3・Gate・2人承認はそのまま）。変更パスが1つも無い評価では全部を必須にする。
 preflightは事前の通知とGate判定だけに使い、完了判定ではrunもCIも実際のdiffでverifierを選び直す。SEC-AUTH-001で`apps/`のどの認証テストにも入らないパスを変えたときは、認証テストを全部必須にする。

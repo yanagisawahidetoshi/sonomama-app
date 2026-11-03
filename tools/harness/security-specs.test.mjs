@@ -201,7 +201,7 @@ describe('Security Verifier configuration for authentication, RLS and data lifec
         assert.equal(verifier.directory, `apps/${app}`);
         assert.equal(verifier.isolation ?? 'container', 'container');
         assert.equal(verifier.network, true);
-        assert.deepEqual(verifier.setupCommands, [['pnpm', 'install', '--frozen-lockfile', '--prefer-offline', '--filter', app]]);
+        assert.deepEqual(verifier.setupCommands, [['pnpm', 'install', '--frozen-lockfile', '--offline', '--filter', app]]);
         assert.equal(verifier.commands.some(c => c.includes('install')), false);
         assert.deepEqual(verifier.commands.slice(1), [runner, ['node', '../../tools/harness/security-specs.mjs', id, '--report', testReport]]);
         assert.equal(verifier.commands.flat().some(arg => /passWithNoTests/i.test(arg)), false);
