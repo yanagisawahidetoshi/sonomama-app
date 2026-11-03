@@ -53,4 +53,17 @@ describe('Dependencies of a Trusted Acceptance run against a PR tree', () => {
       assert.equal(status(await judge(t)), 'FAIL');
     }));
   });
+  describe('given a package found only above the trusted root', () => {
+    it('when Node would walk up past the trusted installation then the run fails instead of loading it', () => trees(async t => {
+      await mkdir(join(t.root, 'node_modules'), { recursive: true });
+      await pkg(join(t.root, '..'), 'harness-dep', 'trusted');
+      assert.equal(status(await judge(t)), 'FAIL');
+    }));
+  });
+  describe('given a trusted root without node_modules', () => {
+    it('when the Trusted Acceptance imports no package then it still runs', () => trees(async t => {
+      await writeFile(join(t.workspace, 'tools/under-test.mjs'), "export const source = 'trusted';\n");
+      assert.equal(status(await judge(t)), 'PASS');
+    }));
+  });
 });
