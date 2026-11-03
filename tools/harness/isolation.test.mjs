@@ -1,10 +1,10 @@
-import { describe, it } from 'node:test';
+import { before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, chmod, readFile, rm, stat } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fixture } from './test-fixture.mjs';
+import { fixture, prepareImage } from './test-fixture.mjs';
 import { check } from './check.mjs';
 import { verify } from './verifier.mjs';
 import { verifySecurity } from './security-enforcement.mjs';
@@ -338,10 +338,12 @@ describe('Verifier isolation', () => {
 });
 
 describe('Verifier isolation with a real Docker daemon', () => {
+  const probeImage = 'node:22.23.4-bookworm-slim';
+  before(() => prepareImage(probeImage));
   describe('given a Compose service built from the workspace whose Compose file asks for root', () => {
     it('when a Compose security verifier runs it then the command runs as the host user, not root', () => fixture(async root => {
       await mkdir(join(root, 'probe'), { recursive: true });
-      await writeFile(join(root, 'probe/Dockerfile'), 'FROM node:22.23.4-bookworm-slim\n');
+      await writeFile(join(root, 'probe/Dockerfile'), `FROM ${probeImage}\n`);
       await writeFile(join(root, 'compose.yaml'), 'services:\n  probe:\n    build:\n      context: ./probe\n    user: root\n');
       const config = { timeoutMs: 300000, securityVerifiers: [{ id: 'probe', directory: '.', isolation: 'compose', network: true, commands: [['docker', 'compose', '-f', 'compose.yaml', 'run', '--rm', 'probe', 'sh', '-c', 'echo "UID $(id -u) HOME $HOME"'], ['docker', 'compose', '-f', 'compose.yaml', 'down']] }] };
       const result = await verifySecurity({ workspace: root, sbi, assessment: { requiredVerifiers: ['probe'] }, policy: { verifiers: [] }, config, headSha: 'x' });
@@ -359,7 +361,7 @@ describe('Verifier isolation with a real Docker daemon', () => {
   describe('given a Compose verifier without network', () => {
     it('when its service runs then it reaches the other Compose service but not the outside network', () => fixture(async root => {
       await mkdir(join(root, 'probe'), { recursive: true });
-      await writeFile(join(root, 'probe/Dockerfile'), 'FROM node:22.23.4-bookworm-slim\n');
+      await writeFile(join(root, 'probe/Dockerfile'), `FROM ${probeImage}\n`);
       const peer = "require('node:http').createServer((q, s) => s.end('peer')).listen(8080)";
       const probe = `const get = async url => { try { await fetch(url, { signal: AbortSignal.timeout(5000) }); return 'reached'; } catch { return 'blocked'; } };
 (async () => { let inside = 'blocked'; for (let i = 0; i < 20 && inside === 'blocked'; i++) { inside = await get('http://peer:8080'); if (inside === 'blocked') await new Promise(r => setTimeout(r, 500)); }
