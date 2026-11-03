@@ -118,7 +118,9 @@ export const configSchema = z.strictObject({
   // #300: Harness tests that run whole Harness flows, each with the modules it is responsible for. CI runs one only when it or an owner
   // changes, pre-push never, a push to main always. Every other Harness test is a unit test, selected by the modules it names.
   harnessTests: z.strictObject({
-    integration: z.record(relativePath.regex(/\.test\.mjs$/), z.array(relativePath.regex(/(?<!\.test)\.mjs$/)).min(1)).default({}),
+    // The test lies in a directory harness:test runs, and each owner is a Harness module, so a declaration can never sit where nothing selects it.
+    integration: z.record(relativePath.regex(/^(tools\/harness(\/agents)?|\.harness\/verification(\/lib)?)\/[^/]+\.test\.mjs$/),
+      z.array(relativePath.regex(/^(tools\/harness|\.harness\/verification)\/.*(?<!\.test)\.mjs$/)).min(1)).default({}),
   }).default({ integration: {} }),
 }).refine(c => new Set(c.verifiers.map(v => v.id)).size === c.verifiers.length && !c.verifiers.some(v => v.id === 'sample-bdd'), 'duplicate or reserved verifier');
 // Migration and ADR left the Human Gate with #157: an ordinary schema change or an ADR needs one review, not two humans before implementation.
