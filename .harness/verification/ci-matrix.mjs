@@ -63,8 +63,14 @@ try {
       const result = await verify({ root, workspace: root, config: unconfigured, sbi: sbi([]), files: files(paths.api), only: new Set(['api-contract']), selected: new Map([['api-contract', true]]) });
       assert.notEqual(result.status, 'PASS');
     }],
-    ['CI-AC-15', 'Given a Harness change, When analysing, Then the Full Gate runs harness:test and the self-repair demo', () => {
-      for (const path of ['tools/harness/verifier.mjs', '.harness/config/harness.json', '.harness/verification/admin-env.mjs', '.harness/rules/pr-risk.json']) {
+    // #288 transition: CI-AC-15 moves from "every Harness change runs the Full Gate" to "a pull request runs the affected Harness tests".
+    // Until #292 lands, a Harness module change may run either; the config change and the job wiring are required by both.
+    ['CI-AC-15', 'Given a Harness change, When analysing, Then harness:test runs, in full or for the affected tests of a changed module', () => {
+      for (const path of ['tools/harness/verifier.mjs', '.harness/verification/admin-env.mjs']) {
+        const impact = analyzeImpact({ config: config(), sbis: [], files: files(path) });
+        assert.ok(impact.fullGate === true || impact.harnessModules?.includes(path), path);
+      }
+      for (const path of ['.harness/config/harness.json', '.harness/rules/pr-risk.json']) {
         assert.equal(analyzeImpact({ config: config(), sbis: [], files: files(path) }).fullGate, true, path);
       }
       assert.match(job('harness-test'), /full_gate == 'true'/);
