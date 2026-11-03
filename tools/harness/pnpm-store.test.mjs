@@ -40,7 +40,7 @@ async function fakeDocker(test, { fetch = 'ok' } = {}) {
     await writeFile(docker, `#!${process.execPath}
 const args = process.argv.slice(2);
 require('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, env: process.env }) + '\\n');
-if (args[0] === 'run' && args.includes('fetch')) {
+if (args[0] === 'run' && args.some(a => /\\bpnpm fetch\\b/.test(a))) {
   if (${JSON.stringify(fetch)} === 'fail') process.exit(1);
   if (${JSON.stringify(fetch)} === 'hang') setTimeout(() => {}, 60000);
 }
@@ -61,7 +61,8 @@ async function withCredentials(test) {
 const verify = (root, docker, adapter = verifier(), settings = {}) => runIsolated({ workspace: root, cwd: root, adapter, config: { timeoutMs: 5000, setupTimeoutMs: 5000, isolation: { docker }, ...settings } });
 const mounts = call => call.args.flatMap((a, i) => call.args[i - 1] === '--mount' ? [Object.fromEntries(a.split(',').map(kv => kv.split('=')))] : []);
 const envNames = call => call.args.flatMap((a, i) => call.args[i - 1] === '-e' ? [a.split('=')[0]] : []);
-const fetchRun = calls => calls.find(c => c.args[0] === 'run' && c.args.includes('fetch'));
+// pnpm fetch rewrites the lockfile beside it, so the fetch copies its read-only inputs first and the command is a shell line.
+const fetchRun = calls => calls.find(c => c.args[0] === 'run' && c.args.some(a => /\bpnpm fetch\b/.test(a)));
 const verifierRun = calls => calls.find(c => c.args[0] === 'run' && c.args.includes('infinity'));
 const installExec = calls => calls.find(c => c.args[0] === 'exec' && c.args.includes('install'));
 const storeMount = call => mounts(call).find(m => m.dst === '/pnpm-store');
