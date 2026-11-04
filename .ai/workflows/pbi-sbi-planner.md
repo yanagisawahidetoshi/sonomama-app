@@ -1,6 +1,6 @@
 # PBI → SBI Plannerの運用
 
-1. PBIをGitHub Issueに書く。背景・目的・受け入れ要件・やらないことがあれば分割精度が上がる。
+1. PBIをGitHub Issueに書く。Issueの作成画面で「PBI」テンプレート（`.github/ISSUE_TEMPLATE/pbi.md`）を選ぶ。背景・目的・受け入れ要件・対象外を埋めると分割精度が上がる。
 2. `gh auth status`で対象リポジトリへissues: writeできることを確認する。
 3. `pnpm planner:sbi https://github.com/<owner>/<repo>/issues/<number>`を実行する。
    providerの既定はclaude。Codexだけ使える場合は`--provider codex`を付ける。CLIはインストール・ログイン済みでPATHから起動できることが必要。
