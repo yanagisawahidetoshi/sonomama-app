@@ -53,12 +53,12 @@ bypass_actorsを空にしているので、管理者でもRulesetを迂回した
 
 ```sh
 # 既存のRulesetを確認する。mainという名前のRulesetがなければ作成する
-gh api repos/yanagisawahidetoshi/sonomama-harness/rulesets
-gh api -X POST repos/yanagisawahidetoshi/sonomama-harness/rulesets --input .github/rulesets/main.json
+gh api repos/{owner}/{repo}/rulesets
+gh api -X POST repos/{owner}/{repo}/rulesets --input .github/rulesets/main.json
 
 # 作成済みのRulesetを、.github/rulesets/main.jsonの内容に更新する
-RULESET_ID=$(gh api repos/yanagisawahidetoshi/sonomama-harness/rulesets --jq '.[] | select(.name == "main") | .id')
-gh api -X PUT "repos/yanagisawahidetoshi/sonomama-harness/rulesets/$RULESET_ID" --input .github/rulesets/main.json
+RULESET_ID=$(gh api repos/{owner}/{repo}/rulesets --jq '.[] | select(.name == "main") | .id')
+gh api -X PUT "repos/{owner}/{repo}/rulesets/$RULESET_ID" --input .github/rulesets/main.json
 ```
 
 privateリポジトリでRulesetを使うには、GitHub Pro以上のプランが必要。作成が403で失敗した場合は、プランを確認する。
@@ -68,7 +68,7 @@ privateリポジトリでRulesetを使うには、GitHub Pro以上のプラン�
 1. mainに効いているルールを読む。`deletion`、`non_fast_forward`、`pull_request`、`required_status_checks`の4つが出て、必須チェックが`Completion Judge`（`integration_id`は15368）であることを確かめる。
 
    ```sh
-   gh api repos/yanagisawahidetoshi/sonomama-harness/rules/branches/main --jq '.[] | {type, parameters}'
+   gh api repos/{owner}/{repo}/rules/branches/main --jq '.[] | {type, parameters}'
    ```
 
 2. mainへの直接pushが拒否されることを確かめる。設定が効いていなければ空のcommitがmainに入るので、最初の手順で4つのルールを確認してから行う。
