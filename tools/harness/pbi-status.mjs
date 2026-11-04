@@ -145,19 +145,20 @@ export async function collectPbiStatus({ root, pbiUrl, config, github = githubCl
 
 const mark = ok => ok ? '✅' : '❌';
 export function renderPbiStatus(result) {
+  // Every SBI is DONE and only the human integration test remains; a closed PBI is no longer waiting for it.
+  const awaitingIntegrationTest = result.ready && result.pbi.state === 'open' && result.acceptance !== 'APPROVED';
   const sbiLine = s => [`${mark(s.status === 'DONE')} ${s.id} ${s.kind} (#${s.issueUrl.split('/').pop()})`,
     ...(s.kind === 'implementation' ? [s.merged ? `merged PR #${s.pullRequest.number}` : 'not merged', `verifier ${s.requiredVerifiers ?? '-'}`] : []),
     s.evidence === 'NOT_CONNECTED' ? 'E2E 未接続' : s.evidence === 'UNREADABLE' ? 'E2E unreadable'
       : s.e2e ? `E2E ${s.e2e.api} ${s.e2e.status}${s.evidence === 'MANIFEST' ? ' (manifest)' : ''}` : s.kind === 'validation' ? 'E2E -' : 'E2E none'].join(' / ');
   return [
     `PBI: #${result.pbi.number} ${result.pbi.title ?? '(unreadable)'}`, `Status: ${result.status}`,
-    // Every SBI is DONE and only the human integration test remains; a closed PBI is no longer waiting for it.
-    ...(result.ready && result.pbi.state === 'open' && result.acceptance !== 'APPROVED' ? ['Next Action: HUMAN_INTEGRATION_TEST'] : []), '',
+    ...(awaitingIntegrationTest ? ['Next Action: HUMAN_INTEGRATION_TEST'] : []), '',
     'PBI plan', result.plan.digest ? `${mark(result.plan.approved)} ${result.plan.approved ? 'APPROVED (plan-approved, ' : 'NOT_APPROVED ('}digest ${result.plan.digest.slice(0, 12)})` : '❌ ## SBI構成 なし', '',
     'SBI', ...(result.sbis.length ? result.sbis.map(sbiLine) : ['❌ none']), '',
     'Human Acceptance', `${mark(result.acceptance === 'APPROVED')} ${result.acceptance} (GitHub Issue: ${result.pbi.state ?? 'unknown'} / ${result.pbi.stateReason ?? 'unknown'})`,
     ...(result.evidenceDigest ? [`Evidence digest: ${result.evidenceDigest}`] : []),
-    ...(result.ready && result.acceptance !== 'APPROVED' ? [`確認後: GitHubのPBIに動作確認結果を記録し、PBI Issueを完了として閉じてください`] : []), '',
+    ...(awaitingIntegrationTest ? [`確認後: GitHubのPBIに動作確認結果を記録し、PBI Issueを完了として閉じてください`] : []), '',
     'Blockers', ...(result.blockers.length ? result.blockers.map(b => `${mark(b.state === 'closed')} ${b.url} ${b.title} (${b.state})`) : ['✅ none']),
     ...(result.reasons.length ? ['', 'Reason:', ...result.reasons.map(r => `- ${r}`)] : []),
   ];

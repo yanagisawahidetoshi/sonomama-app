@@ -454,12 +454,12 @@ describe('PBI Status: display', () => {
       ['every SBI is DONE and the PBI is closed as completed', { state: 'closed', state_reason: 'completed' }, false],
       ['every SBI is DONE and the PBI is cancelled', { state: 'closed', state_reason: 'not_planned' }, false],
     ]) {
-      it(`when ${name} then the human integration test is ${shown ? '' : 'not '}shown as the next action`, async () => {
+      it(`when ${name} then the human integration test and its guidance are ${shown ? '' : 'not '}shown`, async () => {
         const { state } = world();
         Object.assign(state.pbi, issue);
         const text = renderPbiStatus(await status({ state, records: [] })).join('\n');
         if (shown) assert.match(text, /^Status: NOT_DONE\nNext Action: HUMAN_INTEGRATION_TEST$/m);
-        else assert.doesNotMatch(text, /Next Action/);
+        else assert.doesNotMatch(text, /Next Action|確認後/);
       });
     }
     it('when the PBI is open but an SBI is not DONE then no next action is shown', async () => {
