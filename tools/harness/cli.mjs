@@ -1,4 +1,5 @@
 import { describePhases } from './isolation.mjs';
+import { verifierDiagnostics } from './verifier-output.mjs';
 import { fileURLToPath } from 'node:url';
 import { check, runHarness, resumeRun, cleanupRun, openPullRequest, approveRun, runExitCode, reverifyPullRequest } from './index.mjs';
 import { withEvidenceProtection, redactText } from './evidence-protection.mjs';
@@ -12,7 +13,7 @@ import { checkConclusion, runTrustedJudge } from './trusted-judge.mjs';
 import { runPushGate } from './push-gate.mjs';
 import { providerAiReviewer } from './agents/ai-review-adapter.mjs';
 import { describeSbiSource } from './sbi-source.mjs';
-import { collectPbiStatus, renderPbiStatus, acceptPbi } from './pbi-status.mjs';
+import { collectPbiStatus, renderPbiStatus } from './pbi-status.mjs';
 import { writePbiPlan, approvePbiPlan } from './pbi-plan.mjs';
 import { postSpecApproval } from './spec-approval.mjs';
 import { githubCli } from './planner-github.mjs';
@@ -37,8 +38,6 @@ User-facing:
   pnpm harness:pbi-plan-approve PBI_URL [--decision approve|revoke]
                                                      PBI本文の ## SBI構成（Plannerが書いたSBI集合）を確認して承認する。PBIごとに一度
   pnpm harness:pbi-status PBI_URL [--json]          PBIのSBI・Evidence・受け入れ・blockerを集めてDONE / NOT_DONEと理由を表示する
-  pnpm harness:pbi-accept PBI_URL --evidence DIGEST [--decision approve|revoke|request-changes]
-                                                     pbi-statusが表示したEvidence digestに対するPBI Human Acceptanceを署名付き台帳へ記録する
   pnpm harness:reverify PR_URL                       mainが進んだPRを、実装を保持したまま最新mainと統合して再検証し、同じPRを更新する
                                                      （PR HEADと最新mainが前回PASSしたrunのままなら何もせずAlready verifiedを表示）
 API design (API契約を設計するときだけ):
@@ -65,7 +64,7 @@ async function printVerifier({ root: workspace = root, base, all, id }) {
   const selection = impact.verifiers.find(v => v.id === id);
   console.log(redactText(`Selected by: ${selection ? selection.reasons.join(', ') : '(not selected by impact)'}`));
   for (const c of result.checks) {
-    for (const p of c.processes || (c.process ? [c.process] : [])) if (!p.ok) console.error(redactText((p.stderr || p.stdout || p.error || '').slice(-4000)));
+    for (const line of verifierDiagnostics(c)) console.error(line);
     console.log(redactText(`${c.id}: ${c.status}${c.reason ? ` (${c.reason})` : ''} [${c.selectionReasons.join(', ')}]${describePhases(c)}`));
   }
   return passed;
@@ -73,10 +72,10 @@ async function printVerifier({ root: workspace = root, base, all, id }) {
 await withEvidenceProtection(root, async () => {
 try {
   const [command, ...args] = process.argv.slice(2);
-  const allowed = { check: ['--sbi'], demo: ['--sbi', '--full'], run: ['--provider', '--sbi', '--full'], plan: ['--provider'], 'spec-approve': ['--decision'], 'api-mock': ['--dynamic'], 'api-docs': ['--port'], cleanup:['--run'], impact: ['--base', '--all'], verify: ['--base', '--all', '--verifier'], judge: ['--base', '--all', '--trusted'], 'push-gate': [], resume: ['--run'], pr: ['--run'], reverify: [], approve: ['--run', '--phase', '--decision'], export: ['--run','--out'], 'pbi-status': ['--json'], 'pbi-accept': ['--evidence', '--decision'], 'pbi-plan': [], 'pbi-plan-approve': ['--decision'] };
+  const allowed = { check: ['--sbi'], demo: ['--sbi', '--full'], run: ['--provider', '--sbi', '--full'], plan: ['--provider'], 'spec-approve': ['--decision'], 'api-mock': ['--dynamic'], 'api-docs': ['--port'], cleanup:['--run'], impact: ['--base', '--all'], verify: ['--base', '--all', '--verifier'], judge: ['--base', '--all', '--trusted'], 'push-gate': [], resume: ['--run'], pr: ['--run'], reverify: [], approve: ['--run', '--phase', '--decision'], export: ['--run','--out'], 'pbi-status': ['--json'], 'pbi-plan': [], 'pbi-plan-approve': ['--decision'] };
   if (!allowed[command]) throw new Error(usage);
   const options = {};
-  const positional = ['plan', 'spec-approve', 'api-mock', 'run', 'approve', 'reverify', 'pbi-status', 'pbi-accept', 'pbi-plan', 'pbi-plan-approve'].includes(command) && args.length && !args[0].startsWith('--') ? args.shift() : null;
+  const positional = ['plan', 'spec-approve', 'api-mock', 'run', 'approve', 'reverify', 'pbi-status', 'pbi-plan', 'pbi-plan-approve'].includes(command) && args.length && !args[0].startsWith('--') ? args.shift() : null;
   for (let i = 0; i < args.length; i += 2) {
     if (['--full', '--dynamic', '--all', '--json', '--trusted'].includes(args[i]) && allowed[command].includes(args[i]) && !options[args[i]]) { options[args[i]]=true; i--; continue; }
     if (!allowed[command].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--') || options[args[i]]) throw new Error(`Invalid arguments for ${command}`);
@@ -105,17 +104,9 @@ try {
       const approved = await approvePbiPlan({ pbiUrl: positional, decision });
       console.log(`PBI plan ${approved.digest}: ${approved.approved ? 'APPROVED (plan-approved label)' : 'NOT_APPROVED'}`);
     }
-  } else if (command === 'pbi-status' || command === 'pbi-accept') {
-    if (!positional) throw new Error(`${command} requires a PBI URL: ${command} https://github.com/<owner>/<repo>/issues/<number>`);
-    let result;
-    if (command === 'pbi-accept') {
-      if (!options['--evidence']) throw new Error('pbi-accept requires --evidence DIGEST (the Evidence digest shown by harness:pbi-status)');
-      const decision = { approve: 'APPROVE', revoke: 'REVOKE', 'request-changes': 'REQUEST_CHANGES' }[options['--decision'] || 'approve'];
-      if (!decision) throw new Error('Unknown PBI acceptance decision');
-      const accepted = await acceptPbi({ root, pbiUrl: positional, evidenceDigest: options['--evidence'], decision });
-      console.log(`Recorded ${decision} for ${accepted.record.evidenceDigest}`);
-      result = accepted.status;
-    } else result = await collectPbiStatus({ root, pbiUrl: positional });
+  } else if (command === 'pbi-status') {
+    if (!positional) throw new Error('pbi-status requires a PBI URL: pbi-status https://github.com/<owner>/<repo>/issues/<number>');
+    const result = await collectPbiStatus({ root, pbiUrl: positional });
     if (options['--json']) console.log(redactText(JSON.stringify(result, null, 2)));
     else for (const line of renderPbiStatus(result)) console.log(redactText(line));
     process.exitCode = result.status === 'DONE' ? 0 : 2;

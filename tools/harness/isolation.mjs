@@ -31,7 +31,7 @@ async function phased({ setup, commands, limits, run }) {
     const started = Date.now();
     let failed = null;
     for (const command of list) {
-      const result = { ...await run(command, timeoutMs), phase: name };
+      const result = { ...await run(command, timeoutMs), command: [...command], phase: name };
       processes.push(result);
       if (!result.ok) { failed ??= { result, command }; if (stopOnFailure) break; }
     }

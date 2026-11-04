@@ -37,7 +37,7 @@ export function renderPlanSection(pbiUrl, plan) {
     startMarker(pbiUrl), '## SBI構成', '',
     ...plan.sbis.map(s => `- ${s.id}: #${s.number} ${s.kind}${s.dependsOn.length ? ` 依存: ${s.dependsOn.join(', ')}` : ''}`), '',
     `PBI plan digest: \`${planDigest(plan)}\``, '確認後に承認する: このPBIに `plan-approved` ラベルを付ける',
-    '_SONOMAMA Harnessが生成。この節を編集するとdigestが変わり、PBI Human Acceptanceの証跡は無効になる。_', endMarker, '',
+    '_SONOMAMA Harnessが生成。この節を編集するとdigestが変わる。構成変更後は人間が要件と動作を再確認する。_', endMarker, '',
   ].join('\n');
 }
 

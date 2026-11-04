@@ -14,14 +14,10 @@ const sbis = [
 ];
 const implemented = { merged: true, requiredVerifiers: 'PASS', e2e: { status: 'PASS', api: 'mock' } };
 const validated = { e2e: { status: 'PASS', api: 'real' }, evidenceDigest };
-const approval = (overrides = {}) => ({
-  id: 'rec-1', purpose: 'pbi-acceptance', pbiUrl, reviewer: 'os:501:reviewer', kind: 'human', identitySource: 'local-os-user',
-  decision: 'APPROVE', decidedAt: '2026-10-28T00:00:00.000Z', evidenceDigest, signature: 's'.repeat(64), ...overrides,
-});
 const done = (overrides = {}) => ({
-  pbiUrl, sbis,
+  pbiUrl, pbiState: 'closed', pbiStateReason: 'completed', sbis,
   results: { 'SBI-001': implemented, 'SBI-002': { ...implemented, e2e: null }, 'SBI-003': validated },
-  acceptanceRecords: [approval()], blockers: [], ...overrides,
+  blockers: [], ...overrides,
 });
 // Without a validation SBI the adapter supplies the digest of the merged implementation evidence the human confirms.
 const implementationsOnly = (overrides = {}) => done({
@@ -67,7 +63,7 @@ describe('SBI kind', () => {
 
 describe('PBI Completion Judge', () => {
   describe('given a PBI with implementation SBIs and one validation SBI', () => {
-    it('when every implementation SBI is done, validation passed against the real API, the PBI Human Acceptance Gate is approved and no open blocker remains then the PBI is DONE', () => {
+    it('when every implementation SBI is done, validation passed against the real API, the PBI Issue is closed as completed and no open blocker remains then the PBI is DONE', () => {
       assert.deepEqual(judgePbi(done()), { status: 'DONE', sbis: { 'SBI-001': 'DONE', 'SBI-002': 'DONE', 'SBI-003': 'DONE' }, acceptance: 'APPROVED', reasons: [] });
     });
     const notDone = [
@@ -78,12 +74,11 @@ describe('PBI Completion Judge', () => {
       ['the validation E2E failed', { results: { ...done().results, 'SBI-003': { ...validated, e2e: { status: 'FAIL', api: 'real' } } } }, /SBI-003.*E2E/],
       ['the validation E2E ran against the mock', { results: { ...done().results, 'SBI-003': { ...validated, e2e: { status: 'PASS', api: 'mock' } } } }, /SBI-003.*実API/],
       ['the validation has no result yet', { results: { 'SBI-001': implemented, 'SBI-002': implemented } }, /SBI-003/],
-      ['no human approved the PBI Human Acceptance Gate', { acceptanceRecords: [] }, /PBI Human Acceptance Gate.*承認/],
-      ['the only approval was revoked', { acceptanceRecords: [approval(), approval({ id: 'rec-2', decision: 'REVOKE', decidedAt: '2026-10-28T01:00:00.000Z' })] }, /PBI Human Acceptance Gate.*承認/],
-      ['the approval is for a different validation evidence', { acceptanceRecords: [approval({ evidenceDigest: 'b'.repeat(64) })] }, /PBI Human Acceptance Gate.*承認/],
-      ['the approval is for another PBI', { acceptanceRecords: [approval({ pbiUrl: 'https://github.com/acme/app/issues/9' })] }, /PBI Human Acceptance Gate.*承認/],
-      ['the approval is an agent JSON without a human identity', { acceptanceRecords: [approval({ kind: 'ai' })] }, /PBI Human Acceptance Gate.*承認/],
-      ['the approval comes from the merge approval purpose', { acceptanceRecords: [approval({ purpose: 'merge' })] }, /PBI Human Acceptance Gate.*承認/],
+      ['the PBI is still open', { pbiState: 'open' }, /PBI.*完了として閉じ/],
+      ['the PBI was reopened', { pbiState: 'open', acceptanceRecords: [{ decision: 'APPROVE' }] }, /PBI.*完了として閉じ/],
+      ['the PBI was closed as not planned', { pbiStateReason: 'not_planned' }, /PBI.*完了として閉じ/],
+      ['the PBI state is unavailable', { pbiState: undefined }, /PBI.*完了として閉じ/],
+      ['the close reason is unavailable', { pbiStateReason: undefined }, /PBI.*完了として閉じ/],
       ['the plan has two validation SBIs', { sbis: [...sbis, { id: 'SBI-004', kind: 'validation', dependsOn: ['SBI-001', 'SBI-002'] }], results: { ...done().results, 'SBI-004': validated } }, /最終確認SBI.*2件/],
       ['an open Issue blocks the PBI (blocked by)', { blockers: [{ url: 'https://github.com/acme/app/issues/20', state: 'open' }] }, /blocker.*issues\/20/],
     ];
@@ -97,33 +92,27 @@ describe('PBI Completion Judge', () => {
     it('when a blocker is already closed then it does not block the PBI', () => {
       assert.equal(judgePbi(done({ blockers: [{ url: 'https://github.com/acme/app/issues/20', state: 'closed' }] })).status, 'DONE');
     });
-    it('when the validation E2E failed then a human approval does not complete the PBI', () => {
+    it('when the validation E2E failed then closing the PBI does not bypass the failed checks', () => {
       const result = judgePbi(done({ results: { ...done().results, 'SBI-003': { ...validated, e2e: { status: 'FAIL', api: 'real' } } } }));
       assert.equal(result.status, 'NOT_DONE');
       assert.equal(result.acceptance, 'PENDING');
     });
-    it('when an implementation SBI is not merged then a human approval does not complete the PBI', () => {
+    it('when an implementation SBI is not merged then closing the PBI does not bypass the failed checks', () => {
       const result = judgePbi(done({ results: { ...done().results, 'SBI-002': { ...implemented, merged: false } } }));
       assert.equal(result.status, 'NOT_DONE');
       assert.equal(result.acceptance, 'PENDING');
     });
   });
   describe('given a PBI without a validation SBI because no Integration / E2E is needed', () => {
-    it('when every implementation SBI is done and the PBI Human Acceptance Gate is approved for the implementation evidence then the PBI is DONE', () => {
+    it('when every implementation SBI is done and the PBI Issue is closed as completed for the implementation evidence then the PBI is DONE', () => {
       assert.deepEqual(judgePbi(implementationsOnly()), { status: 'DONE', sbis: { 'SBI-001': 'DONE', 'SBI-002': 'DONE' }, acceptance: 'APPROVED', reasons: [] });
     });
-    it('when the adapter supplied no evidence digest then the PBI is not DONE because the approval cannot be bound to evidence', () => {
-      const result = judgePbi(implementationsOnly({ evidenceDigest: undefined }));
-      assert.equal(result.status, 'NOT_DONE');
-      assert.ok(result.reasons.some(r => /Evidence digest/.test(r)), JSON.stringify(result.reasons));
+    it('when no signed acceptance record or approval digest exists then closing the PBI completes it without a dedicated command', () => {
+      const result = judgePbi(implementationsOnly({ evidenceDigest: undefined, acceptanceRecords: [] }));
+      assert.equal(result.status, 'DONE');
     });
-    it('when the approval is for older implementation evidence then the PBI is not DONE', () => {
-      const result = judgePbi(implementationsOnly({ evidenceDigest: 'c'.repeat(64) }));
-      assert.equal(result.status, 'NOT_DONE');
-      assert.equal(result.acceptance, 'PENDING');
-    });
-    it('when no human approved then the PBI is not DONE even though every implementation SBI is done', () => {
-      assert.equal(judgePbi(implementationsOnly({ acceptanceRecords: [] })).status, 'NOT_DONE');
+    it('when the PBI remains open then all implementation SBIs passing is not sufficient', () => {
+      assert.equal(judgePbi(implementationsOnly({ pbiState: 'open' })).status, 'NOT_DONE');
     });
   });
   describe('given the start condition of each kind', () => {
