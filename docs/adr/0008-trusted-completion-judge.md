@@ -3,6 +3,7 @@
 - 状態: Accepted（2026-10-31、柳沢英俊が承認）
 - 日付: 2026-10-31
 - 改訂: 2026-10-31、柳沢英俊の決定で、実行 job を `pull_request_target` から `pull_request` に戻した。同日、専用 GitHub App を見送り、証拠の作り手を変える PR は人が確認する構成にした（この改訂の PR の merge で承認）。同日、ruleset の切替後の偽装の確認（#234、#235）で API による偽装が通ることがわかり、既知の制約と merge の前の確認を追記した（柳沢英俊の指示。この PR の merge で承認）
+- 改訂: 2026-11-04、適用済みの切替手順、L3 floorの時限の記述、実装の詳細と回帰テストの列挙を削った（このPRのmergeで承認）
 - 判断者: 柳沢英俊
 - 関連Issue: #168、#147、#148、#100
 - 関連SBI: なし
@@ -14,7 +15,7 @@
 
 ## 背景
 
-今の必須チェックは、ruleset の `harness`（integration_id 15368 = GitHub Actions）だけ。`harness` job は `pull_request` で動き、PR head の `tools/harness` で判定している。
+この ADR の前は、必須チェックは ruleset の `harness`（GitHub Actions）だけで、`pull_request` で動き、PR head の `tools/harness` で判定していた。
 `pull_request` では workflow ファイル自体も PR 側のものが使われるので、PR は判定コードも workflow も差し替えられる。
 
 2026-10-31 に、`spike/168-base` だけを対象にした一時 ruleset（`probe`@15368 を必須）で確かめた（PR #208〜#213、確認後に ruleset とブランチは削除済み）。
@@ -50,19 +51,19 @@
 ## 決定
 
 - **実行と判定の trust boundary を分ける。**
-  - 実行: 今の `pull_request` の workflow（`harness.yml`）が PR のコードを checkout し、Verifier・harness-test・harness-demo・maestro・Trusted Acceptance を動かす。その結果は信用しない証拠（untrusted evidence）として扱う。`pull_request` の cache は PR の merge ref の scope に閉じ、main の cache を書き換えない。
+  - 実行: `pull_request` の workflow が PR のコードを checkout し、Verifier・Harness のテスト・E2E・Trusted Acceptance を動かす。その結果は信用しない証拠（untrusted evidence）として扱う。`pull_request` の cache は PR の merge ref の scope に閉じ、main の cache を書き換えない。
   - 判定: `pull_request_target` の workflow（2025-12-08 以降、default branch の workflow だけが使われる）で、main の `tools/harness` と `.harness` を使う。PR の code・依存・script・artifact を install も実行もしない。PR から得るもの（metadata・差分・artifact・job の結果）は判定用のデータとしてだけ扱う。
   - 例外: 手書きの Trusted Acceptance（`trustedScript`）は、今と同じく judge の中で Node の permission model（環境変数なし、PR の tree と信頼側の helper の読み取りだけ、子プロセス不可）で動かす。`ci-matrix` のように PR のコードを import するものがあるので、判定する job には secret も書き込み権限も置かない。check run を書く job は PR の tree を checkout せず、判定する job の結果だけを受け取る。
 - **judge は実行の run を待ってから、独立に検証する。**
-  - 同じ head SHA・event が `pull_request`・workflow が `harness.yml` の run を探し、完了まで poll する（maestro の上限に合わせて timeout を決める）。同じ PR の古い judge は `concurrency` で取り消す。取り消されて check が出なくても BLOCKED なので fail-closed。
-  - impact は main のコードで PR の差分から計算し直す。要求した verifier ごとに、その run の jobs API で `verifiers (<name>)` の success を求める。head SHA の check run の一覧は使わない。PR 側の impact が verifier を減らしても、要求は減らない。
-  - artifact（`acceptance-results-*`、`maestro-results`）はその run から API で取り、Zod の schema と head SHA の照合を通す。欠落・schema の不一致・head SHA の不一致・要求したのに skipped は FAIL。
+  - 同じ head SHA の実行の run を探し、完了まで待つ。同じ PR の古い judge は取り消す。取り消されて check が出なくても BLOCKED なので fail-closed。
+  - 要求する verifier は main のコードで PR の差分から計算し直し、その run の job の結果で success を求める。head SHA の check run の一覧は使わない。PR 側が verifier を減らしても、要求は減らない。
+  - 実行の run の artifact は厳格な schema と head SHA の照合を通す。欠落・schema の不一致・head SHA の不一致・要求したのに skipped は FAIL。
   - PR の差分は API か `git fetch` でデータとして読む。fork からの PR は判定しない（`trustedScript` の sandbox で fork のコードが動くのを避ける）。check run は failure になり、BLOCKED のまま。
 - **証拠の作り手（producer）を変えた PR は、自動では通さず人が確認する。** producer は、実行の workflow が読んで動かすもの: `.github/**`、`tools/harness/**`、`.harness/**`（Security policy と判定ロジックを含む）、root の `package.json`・`pnpm-lock.yaml`・`pnpm-workspace.yaml`・`.node-version`・`.npmrc`。lockfile を外すと、依存を差し替えて `harness:verify` を乗っ取れる。ただし、judge が main のコードでデータとして検査するもの（SBI の JSON `.harness/state/sbi-*.json` と、生成した Trusted Acceptance の登録 `.harness/acceptance/sbi-<N>.json`）は除く。
   - 判定は3つにする。`PASS`（success）、`MANUAL_REVIEW_REQUIRED`（neutral）、`FAIL`（failure）。producer の変更があり、ほかがすべて通っていれば `MANUAL_REVIEW_REQUIRED`。ほかに失敗があれば `FAIL` が優先する。
   - neutral は GitHub の必須チェックを満たすので、人が確認して merge できる。Harness の merge 判定（`MERGE_ALLOWED`・`autoMergeEligible`）は success だけを数えるので、自動 merge の対象にはならない。repo の auto-merge は無効のままにする。
   - 通常の L1 / L2 の変更は、今までの条件を満たせば今までどおり自動で判定する。
-- **check run は、判定の結果だけを書く job が `checks: write` の `GITHUB_TOKEN` で出す。** 名前は `Completion Judge`。ruleset の必須チェックを `harness` からこれに切り替える（GitHub Actions、integration_id 15368）。専用 GitHub App・environment・App の秘密鍵は、今は導入しない。
+- **check run は、判定の結果だけを書く job が `checks: write` の `GITHUB_TOKEN` で出す。** 名前は `Completion Judge` で、ruleset の必須チェックはこれだけにする（適用済み）。専用 GitHub App・environment・App の秘密鍵は、今は導入しない。
   - 既知の制約（ruleset の切替後に #234、#235 で確認）: PR の `pull_request` の workflow から `checks: write` の `GITHUB_TOKEN` で同じ名前の check run を後から作ると、本物の `Completion Judge` の FAIL を必須チェックの上で隠せる。API で作った check run は本物と同じ check suite に入り、GitHub は同じ suite の同じ名前のうち新しい方を使う。PR の画面も SUCCESS になり、merge できる状態（UNSTABLE）になった。job 名を `Completion Judge` にする偽装は別の suite に入るので、本物の failure が残り BLOCKED のままだった。どちらの偽装も PR が `.github/**` を変える必要がある。機械的には防がない。
   - 暫定の運用: `.github/**` か `.harness/**` を変える PR は、PR の画面の必須チェックの表示を信用しない。merge の前に、`Completion Judge` の workflow run（`pull_request_target`、main の workflow）の `judge` と `publish` の結論を確かめてから、人が merge する。
 - **判定コードを変える PR**: 合否は main の判定コードで出す。PR 側の `tools/harness` は harness-test（実行）で検証する。PR の `.harness/rules` の変更は merge 後に効く。main 側のルールが要求する検証を PR が消しても、その PR では要求され続ける。
@@ -98,16 +99,11 @@ check の偽装を機械的に防ぐ専用 App は、今の規模では運用の
 
 ## 実装・運用への影響
 
-- 人の作業:
-  1. Actions の event policy で、judge の workflow ファイルにだけ `pull_request_target` を許可する。
-  2. judge の workflow の PR を merge し、`Completion Judge` が出ることを確かめる。
-  3. ruleset の必須チェックを `Completion Judge`（integration_id 15368）に変え、`harness` を外す。
 - repo の auto-merge は無効のままにする（neutral でも merge されないように）。
-- #147 の L3 の floor（生成した Trusted Acceptance を含む PR）は、この方式が動いてから外す。
+- 判定の詳細（実行の run の選び方、job と artifact の名前、待つ上限）は実装とテスト、運用は [.ai/workflows/ci.md](../../.ai/workflows/ci.md) を正とする。
 
 ## 検証方法
 
-- 回帰テスト（実装 PR で先に書く）: 通常の変更は、要求した verifier の job がすべて success なら PASS。要求した verifier の job が実行の run に無いときは FAIL。producer のパスがあり、ほかが通っていれば `MANUAL_REVIEW_REQUIRED`（neutral）で、Harness の merge 判定は通さない。producer の変更とほかの失敗が重なれば FAIL。head SHA・event・workflow が違う run は使わない。artifact の欠落・head SHA の不一致・不明な skipped は FAIL。judge が PR の tree を判定コードとして読まず、PR の code を install も実行もしないこと。judge の workflow は `pull_request_target` だけで動くこと。
 - 切替の前に、#227 で docs だけの変更が success、`.harness/rules` の追加が neutral になることを確かめた。
 - 切替の後に、本物の judge が FAIL を出す PR で偽装を確かめた。job 名による偽装（#234）は BLOCKED、API による偽装（#235）は UNSTABLE（merge できる）。auto-merge の有効化は「Auto merge is not allowed for this repository」で拒否された。
 

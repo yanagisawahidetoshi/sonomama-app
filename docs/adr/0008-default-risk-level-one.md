@@ -1,15 +1,16 @@
 # ADR-0008: 通常の変更の既定Risk LevelをLEVEL 1にし、LEVEL 3を重大リスクに限る
 
-- 状態: Proposed
+- 状態: Accepted（2026-11-04、このPRのmergeで承認。提案の内容は#157の実装で適用済み）
 - 日付: 2026-10-31
-- 判断者: 未決定
+- 改訂: 2026-11-04、実装済みの提案を決定にし、実装の詳細と検証方法の列挙を削った（このPRのmergeで承認）
+- 判断者: 柳沢英俊
 - 関連Issue: #157
 - 関連SBI: なし（Harness本体の変更）
 - 関連Design Docs: [docs/security/README.md](../security/README.md)、[docs/security/threat-model.md](../security/threat-model.md)
 - Supersedes: なし
 - Superseded by: なし
 
-状態の意味とAIの扱いは[README](README.md)を参照する。Proposedの間は、AIはこのADRを決まったものとして実装や提案の根拠にしない。
+状態の意味とAIの扱いは[README](README.md)を参照する。
 
 ## 背景
 
@@ -41,13 +42,11 @@
 
 ## 決定
 
-未決定（Proposed）。現時点の提案は次のとおり。
-
 1. `defaultLevel`を1にする。ルールは下限（floor）を与えるだけで、水準を下げる仕組み（`safeRules`）は持たない。
 2. LEVEL 3は重大リスクに限る。認証・認可・RLS・PII、権限モデル、Secret / Credential、`docs/security`、本番Infrastructure / Deployment（本番以外でも、保護の解除・IAMの全権限・すべての送信元へのingressを追加する変更）、本番データの破壊・不可逆操作、`ALTER|CREATE|DROP POLICY|ROLE`、そしてポリシー自身（`.harness/rules/`・`.harness/state/`・`.github/rulesets/`・`.githooks/`）。
 3. 通常のMigration・schema・OpenAPI / API Schema・CI / GitHub Actions・Dockerfile・ADR・Harness実装はLEVEL 2（人1人）。破壊的・不可逆な操作を変更内容から検知したときだけLEVEL 3へ上げる。
 4. Security ruleのGateと最低LEVELをrule単位にする。SEC-MIGRATION-001・SEC-SCHEMA-001・SEC-CICD-001・SEC-CONFIG-001・SEC-DESIGN-001・SEC-INFRA-001は`preImplementationGate: false` / 最低LEVEL 2 / 承認1人。本番と危険方向のInfrastructure変更はSEC-PRODINFRA-001を新設してLEVEL 3・2人にする。残る9ルールは従来どおりLEVEL 3・2人。
-5. SEC-CONFIG-001のpathPatternから`(^|/)config(/|$)`を外し、セキュリティに関わる設定ファイル（`database.yml`、`credentials*`、`bundler-audit.yml`、`environments/production.rb`、`initializers/{cors,content_security_policy,permissions_policy,session_store,filter_parameter_logging}.rb`）だけに限定する。
+5. SEC-CONFIG-001は、`config/`配下を一律に対象にせず、セキュリティに関わる設定ファイル（DB接続・credentials・本番環境・CORS・CSP・sessionなど）に限定する。
 6. `policy.json`のHuman Gate categoryをAuthN / AuthZ / RLS / PIIの4つにし、`protectedPathPatterns`からmigrationとADRを外す。
 7. SBIは`riskCandidate`（L1 / L2 / L3）で自分の下限を宣言できるようにする。既定はL1、`securityImpact`があればL3。
 
@@ -57,7 +56,7 @@
 人が見る回数を減らしたぶんは、決定的な機械判定が引き受ける。
 
 通常のMigrationをLEVEL 2に落とせるのは、破壊的migrationに対する防御がRisk Levelとは独立に存在するため。
-`migration-safety` verifierが`drop_table`・`remove_column`・`execute`等を静的に検知してFAILにし、通すにはexpand/contractの申請ファイルと**異なる2人のComment Review**が必要で、CIのCompletion Judgeがheadとdigestの一致を確かめる。
+破壊的な操作は静的に検知してFAILにし、通すにはexpand/contractの申請と異なる2人のReviewが必要になる（[database-migrations.md](../workflows/database-migrations.md)）。
 Risk Levelを下げても、この経路は変わらない。
 
 ポリシー自身をLEVEL 3に据え置くのは、Issue #157の「Harness変更は変更しただけで一律L3にしない」と矛盾しない。
@@ -68,33 +67,27 @@ Risk Levelを下げても、この経路は変わらない。
 ### Positive
 
 - 通常のUI変更・API実装・テスト追加・内部リファクタが、必須チェックの成功だけでAuto Merge可能になる。
-- Railsの通常の設定変更が security-sensitive と判定されなくなり、未接続のSecurity Verifier（`authn-test`等）によるNOT_CONFIGURED FAILも減る。
+- Railsの通常の設定変更が security-sensitive と判定されなくなる。
 - Gateと最低LEVELがrule単位になり、「何がなぜ重いのか」が`security.json`を読めば分かる。
 
 ### Negative / Trade-offs
 
-- LEVEL 1の変更は人間の目を通らずにmergeされうる。品質の最後の砦は`policy-review`（空ファイル・サイズ上限・`TODO|FIXME`の決定的検査）とTrusted Acceptanceになる。この2つを弱めてはいけない。
+- LEVEL 1の変更は人間の目を通らずにmergeされうる。品質の最後の砦は決定的なPolicy ReviewとTrusted Acceptanceになる。この2つを弱めてはいけない。
 - 検知の取りこぼしが、以前は「人1人のレビュー」で拾えていたのが拾えなくなる。検知パターンの不足は、見つけたら`pr-risk.json`・`security.json`に足す。
 - `safeRules`を削るので、prototype laneの明示的なLEVEL 1候補という概念はなくなる。prototypeも既定のLEVEL 1に落ち、Productionと同じ条件で`autoMergeEligible`になる。
 
 ## 実装・運用への影響
 
-- `.harness/rules/pr-risk.json`・`security.json`・`human-gates.json`・`policy.json`、`tools/harness/risk-classifier.mjs`・`schemas.mjs`・`check.mjs`・`sbi-issue.mjs`。
-- Security rule: SEC-MIGRATION-001、SEC-SCHEMA-001、SEC-CICD-001、SEC-CONFIG-001、SEC-DESIGN-001、SEC-INFRA-001のGate・最低LEVEL・承認人数を変え、SEC-PRODINFRA-001を足す。他の9ルールは変えない。
-- テストはLEVEL 1になるので、[ADR-0006](0006-change-type-classification.md)が求めるテストの保護を`pr-risk.json`の`testProtection`で入れる。テストファイルの削除、skip・pending・focus化、assertionを含む行の削除はLEVEL 2。
-- GitHub Rulesetは変えない。必須承認は0人のままで、人数はHarnessの`MERGE_ALLOWED`が決める（[ADR-0001](0001-github-review-merge-approval.md)、[docs/workflows/github-ruleset.md](../workflows/github-ruleset.md)）。
-- このADR自身を含む`docs/adr/`の変更はLEVEL 2になる。
+- テストもLEVEL 1になるので、テストの削除・skip・focus化・assertionを含む行の削除はLEVEL 2へ上げる（[ADR-0006](0006-change-type-classification.md)）。
+- GitHub Rulesetは変えない。必須承認は0人のままで、人数はHarnessの`MERGE_ALLOWED`が決める（[ADR-0001](0001-github-review-merge-approval.md)）。
+- 運用では、LEVEL 1でAuto Mergeされた変更に起因する不具合が出ていないかを追う。出るなら検知パターンを足すか、該当種別をLEVEL 2へ戻す。
 
-## 検証方法
-
-- `tools/harness/risk-policy.test.mjs`のLEVEL 1 / 2 / 3の代表ケースが、代表的な変更をその水準に分類すること。
-- 通常のProduction変更で`classifySecurity`の`matchedRules`が空になり、`requiredVerifiers`が`secret-scan`と`forbidden-pattern-check`だけになること。
-- 運用では、LEVEL 1でAuto Mergeされた変更に起因する不具合が出ていないか、Health Metricsで追う。出るなら検知パターンを足すか、該当種別をLEVEL 2へ戻す。
+各ルールの値の正本は`.harness/rules/`。
 
 ## 再検討条件 / 撤回条件
 
 - LEVEL 1でmergeされた変更が本番障害・セキュリティ事故につながった場合。
-- `policy-review`とTrusted Acceptanceで拾えない品質問題が繰り返し出た場合。
+- Policy ReviewとTrusted Acceptanceで拾えない品質問題が繰り返し出た場合。
 - PR側のポリシーで自分を評価する構造（#168）が解消される前に、`.harness/rules/`以外のHarnessファイルから自己弱体化の経路が見つかった場合。
 
 ## 関連資料
