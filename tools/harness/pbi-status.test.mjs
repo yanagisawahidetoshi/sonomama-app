@@ -448,6 +448,27 @@ describe('PBI Status: display', () => {
       assert.match(text, /^Status: DONE$/m);
       assert.doesNotMatch(text, /Reason:/);
     });
+    for (const [name, issue, shown] of [
+      ['every SBI is DONE and the PBI is open', { state: 'open', state_reason: null }, true],
+      ['every SBI is DONE and the PBI is reopened', { state: 'open', state_reason: 'reopened' }, true],
+      ['every SBI is DONE and the PBI is closed as completed', { state: 'closed', state_reason: 'completed' }, false],
+      ['every SBI is DONE and the PBI is cancelled', { state: 'closed', state_reason: 'not_planned' }, false],
+    ]) {
+      it(`when ${name} then the human integration test is ${shown ? '' : 'not '}shown as the next action`, async () => {
+        const { state } = world();
+        Object.assign(state.pbi, issue);
+        const text = renderPbiStatus(await status({ state, records: [] })).join('\n');
+        if (shown) assert.match(text, /^Status: NOT_DONE\nNext Action: HUMAN_INTEGRATION_TEST$/m);
+        else assert.doesNotMatch(text, /Next Action/);
+      });
+    }
+    it('when the PBI is open but an SBI is not DONE then no next action is shown', async () => {
+      const { state } = world();
+      state.pbi.state = 'open'; state.pbi.state_reason = null;
+      const text = renderPbiStatus(await status({ state, records: [], evidence: notConnected })).join('\n');
+      assert.match(text, /^Status: NOT_DONE$/m);
+      assert.doesNotMatch(text, /Next Action/);
+    });
   });
 });
 

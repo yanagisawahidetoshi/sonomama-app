@@ -150,7 +150,9 @@ export function renderPbiStatus(result) {
     s.evidence === 'NOT_CONNECTED' ? 'E2E 未接続' : s.evidence === 'UNREADABLE' ? 'E2E unreadable'
       : s.e2e ? `E2E ${s.e2e.api} ${s.e2e.status}${s.evidence === 'MANIFEST' ? ' (manifest)' : ''}` : s.kind === 'validation' ? 'E2E -' : 'E2E none'].join(' / ');
   return [
-    `PBI: #${result.pbi.number} ${result.pbi.title ?? '(unreadable)'}`, `Status: ${result.status}`, '',
+    `PBI: #${result.pbi.number} ${result.pbi.title ?? '(unreadable)'}`, `Status: ${result.status}`,
+    // Every SBI is DONE and only the human integration test remains; a closed PBI is no longer waiting for it.
+    ...(result.ready && result.pbi.state === 'open' && result.acceptance !== 'APPROVED' ? ['Next Action: HUMAN_INTEGRATION_TEST'] : []), '',
     'PBI plan', result.plan.digest ? `${mark(result.plan.approved)} ${result.plan.approved ? 'APPROVED (plan-approved, ' : 'NOT_APPROVED ('}digest ${result.plan.digest.slice(0, 12)})` : '❌ ## SBI構成 なし', '',
     'SBI', ...(result.sbis.length ? result.sbis.map(sbiLine) : ['❌ none']), '',
     'Human Acceptance', `${mark(result.acceptance === 'APPROVED')} ${result.acceptance} (GitHub Issue: ${result.pbi.state ?? 'unknown'} / ${result.pbi.stateReason ?? 'unknown'})`,
