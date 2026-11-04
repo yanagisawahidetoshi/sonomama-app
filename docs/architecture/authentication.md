@@ -188,7 +188,7 @@ APIの認証テストは`apps/api/spec/authentication/`に置く（Harnessの認
 
 ## 未決事項 / 関連ADR
 
-- Access Tokenの有効期間（Cognitoの既定は60分）
+- Access Tokenの有効期間（5分〜1日の範囲で、App Clientごとに設定できる）
 - 受講生アプリでトークンをSecureStoreに保存できるか（PoCで確認）
 - 管理画面でAmplify UIのデザインが許容されるか
 - ログインIDの形式（メールアドレスをユーザー名にするか）。User Poolを作ったあとには変えられないため、PoCのdev環境のUser Poolは作り直す前提とし、stg・prodのUser Poolを作るまでにADR-0002の側で決める
