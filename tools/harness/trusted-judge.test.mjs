@@ -102,6 +102,23 @@ describe('Jobs of the evidence run', () => {
     assert.notEqual(judged.needs['harness-test'].result, 'success');
   });
 
+  // #288: a PR that changes Harness modules runs only the tests they select, without the full gate.
+  describe('given a PR that selects Harness tests without the full gate', () => {
+    const affected = { ...impact, harnessTests: ['tools/harness/impact.test.mjs'] };
+    const jobs = shards => [...passing.filter(j => !j.name.startsWith('harness-')), ...shards, job('harness-demo', 'skipped')];
+    it('when every harness-test shard succeeded then harness-test succeeds and harness-demo stays skipped', () => {
+      const judged = judgeEvidenceJobs({ jobs: jobs([job('harness-test (1)'), job('harness-test (2)'), job('harness-test (3)')]), impact: affected });
+      assert.deepEqual(judged.reasons, []);
+      assert.equal(judged.needs['harness-test'].result, 'success');
+      assert.equal(judged.needs['harness-demo'].result, 'skipped');
+    });
+    it('when a harness-test shard failed then harness-test fails', () => {
+      const judged = judgeEvidenceJobs({ jobs: jobs([job('harness-test (1)'), job('harness-test (2)', 'failure'), job('harness-test (3)')]), impact: affected });
+      assert.ok(judged.reasons.includes('harness-test (2): failure'), judged.reasons.join('; '));
+      assert.notEqual(judged.needs['harness-test'].result, 'success');
+    });
+  });
+
   it('when the PR-side Completion Judge job failed or passed then it is not counted either way', () => {
     assert.deepEqual(judgeEvidenceJobs({ jobs: passing.map(j => j.name === 'harness' ? job('harness', 'failure') : j), impact }).reasons, []);
     assert.ok(judgeEvidenceJobs({ jobs: [job('impact'), job('harness')], impact }).reasons.length > 0);

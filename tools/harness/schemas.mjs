@@ -74,6 +74,8 @@ export const acceptanceResultSchema = z.strictObject({
   }),
 });
 export const providerTimeoutMs = config => config.providerTimeoutMs ?? config.timeoutMs;
+const harnessTestPath = relativePath.regex(/^(tools\/harness(\/agents)?|\.harness\/verification(\/lib)?)\/[^/]+\.test\.mjs$/);
+const harnessModulePath = relativePath.regex(/^(tools\/harness|\.harness\/verification)\/.*(?<!\.test)\.mjs$/);
 export const configSchema = z.strictObject({
   version: z.literal(1), provider: z.enum(['fake', 'codex', 'claude']), sbi: relativePath,
   maxConsecutiveFailures: z.number().int().min(1).max(3), maxIterations: z.number().int().min(1).max(20),
@@ -115,6 +117,16 @@ export const configSchema = z.strictObject({
     fullGate: z.array(text).default([]),
     toolchain: z.array(text).default([]),
   }).default({ crossLayer: [], fullGate: [], toolchain: [] }),
+  // #300: Harness tests that run whole Harness flows, each with the modules it is responsible for. CI runs one only when it or an owner
+  // changes, pre-push never, a push to main always. Every other Harness test is a unit test, selected by the modules it names.
+  // A shared module (io.mjs) is imported by nearly every test as a test tool; before push its change runs only its direct contract tests,
+  // while CI still runs every unit test naming it. A contract test is a unit test, since pre-push never runs an integration test.
+  harnessTests: z.strictObject({
+    // The test lies in a directory harness:test runs, and each owner is a Harness module, so a declaration can never sit where nothing selects it.
+    integration: z.record(harnessTestPath, z.array(harnessModulePath).min(1)).default({}),
+    shared: z.record(harnessModulePath, z.array(harnessTestPath).min(1)).default({}),
+  }).refine(h => !Object.values(h.shared).flat().some(test => h.integration[test]), 'a shared module contract test must not be an integration test')
+    .default({ integration: {}, shared: {} }),
 }).refine(c => new Set(c.verifiers.map(v => v.id)).size === c.verifiers.length && !c.verifiers.some(v => v.id === 'sample-bdd'), 'duplicate or reserved verifier');
 // Migration and ADR left the Human Gate with #157: an ordinary schema change or an ADR needs one review, not two humans before implementation.
 export const rulesSchema = z.strictObject({

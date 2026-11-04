@@ -59,7 +59,16 @@ export const githubPrCli = {
     if (!match) throw new Error(`git remote ${remote} はGitHubのリポジトリではありません`);
     return { owner: match[1], repo: match[2], name: `${match[1]}/${match[2]}` };
   },
-  // The merge result equals the tested SHA only while the base branch is still the run baseline.
+  // ADR-0011 (#288): a PR opens on a base that moved past the run baseline, as long as the base still contains the baseline and the tested
+  // SHA merges into it without a conflict. The push to main verifies the merged result.
+  async assertMergesIntoBase(root, { remote, base, baselineSha, headSha }) {
+    const fetched = await git(root, ['fetch', '--quiet', '--no-tags', remote, `refs/heads/${base}`], true);
+    const tip = fetched.ok ? (await git(root, ['rev-parse', 'FETCH_HEAD'])).stdout.trim() : null;
+    if (!tip || !(await git(root, ['merge-base', '--is-ancestor', baselineSha, tip], true)).ok) throw new Error(`${remote}/${base} (${tip?.slice(0, 12) ?? 'なし'}) がrunのbaseline ${baselineSha.slice(0, 12)} を含みません。検証していないcommitをPRに載せないため作成しません`);
+    const merged = await git(root, ['merge-tree', '--write-tree', '--name-only', '--no-messages', tip, headSha], true);
+    if (!merged.ok) throw new Error(`tested SHA ${headSha.slice(0, 12)} conflicts with ${remote}/${base} (${tip.slice(0, 12)}): ${merged.stdout.trim().split('\n').slice(1).join(', ')}`);
+  },
+  // Re-verification pushes its candidate only while the base is still the baseline it merged (ADR-0003).
   async assertBaseIsBaseline(root, { remote, base, baselineSha }) {
     const tip = await this.remoteBranchSha(root, remote, base);
     if (tip !== baselineSha) throw new Error(`${remote}/${base} (${tip?.slice(0, 12) ?? 'なし'}) がrunのbaseline ${baselineSha.slice(0, 12)} と一致しません。mergeの結果をHarnessが検証していないため作成しません。最新の${base}からrunを作り直してください`);
@@ -108,7 +117,7 @@ export async function githubState({ github = githubPrCli, root, remote, reposito
   }
   return {
     pullRequest: { number: pull.number, url: pull.html_url, headSha: pull.head.sha, state: pull.state, merged: pull.merged === true || Boolean(pull.merged_at),
-      author: pull.user.login, testedShaMatches: pull.head.sha === headSha, baseRef: pull.base.ref, baseSha: pull.base.sha, remoteBaseSha },
+      author: pull.user.login, testedShaMatches: pull.head.sha === headSha, baseRef: pull.base.ref, baseSha: pull.base.sha, remoteBaseSha, mergeable: pull.mergeable ?? null },
     ci: { requiredChecks: required, ...ciStatus({ checkRuns: await github.checkRuns(repository, pull.head.sha), required }) },
     reviews: { ...reviewApprovals({ reviews, headSha, author: pull.user.login, permissions }), permissions },
   };

@@ -9,9 +9,9 @@ PBI（プロダクトバックログの項目）を受け取ってからmergeす
 5. PRをレビューする: 検証に通ったcommitをPRにし、人がGitHubでレビューする。必要な承認の人数は変更のリスクで決まり、レベル1は0人、レベル2は1人、レベル3は別々の2人以上になる。
 6. mergeする: Harnessが出すのは「mergeしてよい」という判定（MERGE_ALLOWED）と自動merge可否（autoMergeEligible）まで。レベル1で自動mergeできる判定のときだけ自動mergeしてよく、レベル2・3は人がmergeする。
 
-Design System導入、dependency、refactor、tooling、Storybook、build設定など、プロダクト仕様を直接変更しないProduction領域の技術変更はSBIに分けず、[Engineering Change](engineering-changes.md)として承認済みIssueを起点にできる。Verifier・Security・Risk・Human Reviewは通常どおり行う。
+Production領域（apps/・packages/）の変更でSBIが要るかどうかは、diffの変更種別で決まる。すべてのファイルがEngineeringのルールに当たる技術変更は、SBIもIssueもなしでPRにできる（[Engineering Change](engineering-changes.md)）。Verifier・Security・Risk・Human Reviewは通常どおり行う。
 
-デザイナーの試作（prototypes/）を本番に採用する場合は、試作のデザインを人が承認してから、新しいSBIで本番のアプリに実装し直す。試作が検証に通っても、本番の実装を承認したことにはならない。
+デザイナーの試作（prototypes/）を本番に採用する場合は、試作を出典にした新しいSBIを人が承認し、本番のアプリに実装し直す。試作のデザインだけを別に承認する手順はない。試作が検証に通っても、本番の実装を承認したことにはならない。
 
 ## このディレクトリの手順書
 

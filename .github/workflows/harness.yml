@@ -17,6 +17,7 @@ jobs:
     outputs:
       required_verifiers: ${{ steps.impact.outputs.required_verifiers }}
       full_gate: ${{ steps.impact.outputs.full_gate }}
+      harness_tests: ${{ steps.impact.outputs.harness_tests }}
       maestro: ${{ steps.impact.outputs.maestro }}
       head_sha: ${{ steps.impact.outputs.head_sha }}
     steps:
@@ -76,9 +77,10 @@ jobs:
           name: acceptance-results-${{ matrix.verifier }}
           path: ${{ runner.temp }}/acceptance-results
           if-no-files-found: ignore
+  # #288: a pull request that changes only Harness modules runs the tests that name them; the Full Gate and a push to main run every test.
   harness-test:
     needs: impact
-    if: needs.impact.outputs.full_gate == 'true'
+    if: needs.impact.outputs.full_gate == 'true' || needs.impact.outputs.harness_tests != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # The same file list in parallel shards (#197); the Completion Judge reads the combined result of the matrix.
@@ -100,6 +102,7 @@ jobs:
       - run: pnpm harness:test
         env:
           HARNESS_TEST_SHARD: ${{ matrix.shard }}/3
+          HARNESS_TESTS: ${{ needs.impact.outputs.full_gate != 'true' && join(fromJson(needs.impact.outputs.harness_tests), ' ') || '' }}
           # #268: chosen for the runner, independent of the local default in package.json.
           HARNESS_TEST_CONCURRENCY: 3
   harness-demo:

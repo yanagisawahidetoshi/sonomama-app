@@ -36,8 +36,8 @@ importers:
   apps/admin:
     dependencies:
       '@hookform/resolvers':
-        specifier: ^7.0.1
-        version: 7.0.1(fp-ts@2.16.11)(react-hook-form@7.91.0)(zod@4.6.7)
+        specifier: ^7.0.2
+        version: 7.0.2(fp-ts@2.16.11)(react-hook-form@7.91.0)(zod@4.6.7)
       '@tanstack/react-query':
         specifier: ^5.105.0
         version: 5.105.0(@types/react@19.3.0)(react@19.3.0)
@@ -2544,8 +2544,8 @@ packages:
       zod: 4.1.12
     dev: false
 
-  /@hookform/resolvers@7.0.1(fp-ts@2.16.11)(react-hook-form@7.91.0)(zod@4.6.7):
-    resolution: {integrity: sha512-F3aM0dDWsRGmFjnnXjogaGLwP7gY2HA6/c5qp4v4Im/UV7pTNkX+WAjcOlM1V0PE0zoMzuPqCyaYtMzUhoFToA==}
+  /@hookform/resolvers@7.0.2(fp-ts@2.16.11)(react-hook-form@7.91.0)(zod@4.6.7):
+    resolution: {integrity: sha512-8JVNoDGKwBc1iBy/e1CKXJ3ixvN7Ef3NHYlIA+9uuc5ZM+SV9E2nw5vy0SOvu+OMAfBxmyEmEOlGdpd0seQcxg==}
     peerDependencies:
       '@standard-schema/spec': ^1.0.0
       '@vinejs/vine': ^2.0.0 || ^3.0.0 || ^4.0.0

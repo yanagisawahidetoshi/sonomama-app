@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fixture, update } from './test-fixture.mjs';
 import { readJson } from './io.mjs';
-import { analyzeImpact, changedFiles, describeImpact, describeJudge, judgeCi, judgeTestedCommit, runCompletionJudge } from './impact.mjs';
+import { analyzeImpact, changedFiles, describeImpact, describeJudge, judgeCi, judgeTestedCommit, loadImpact, runCompletionJudge } from './impact.mjs';
 import { renderSbiBody } from './planner.mjs';
 import { sbiFromIssue } from './sbi-issue.mjs';
 import { withAcceptance } from './acceptance-registry.mjs';
@@ -111,15 +111,35 @@ describe('SBI Impact Analysis', () => {
     });
   });
 
+  // #288: a pull request runs the Harness tests of the changed modules; only what no import can scope, and a push to main, runs all of them.
   describe('given Harness itself changes', () => {
-    for (const path of ['tools/harness/verifier.mjs', '.harness/config/harness.json', '.harness/verification/admin-env.mjs', '.harness/rules/pr-risk.json', '.github/workflows/harness.yml', '.ai/security-rules.md']) {
+    for (const path of ['.harness/config/harness.json', '.harness/rules/pr-risk.json', '.github/workflows/harness.yml', '.ai/security-rules.md', 'tools/harness/fixtures/sbi.json']) {
       it(`when ${path} changes then triggers the Full Gate with the path as the reason`, () => {
         const impact = analyzeImpact({ config, sbis: [], files: files(path) });
         assert.equal(impact.fullGate, true);
         assert.deepEqual(impact.fullGateReasons, [`diff:${path}`]);
       });
     }
-
+    for (const path of ['tools/harness/verifier.mjs', '.harness/verification/admin-env.mjs']) {
+      it(`when only the module ${path} changes then asks for its affected Harness tests instead of the Full Gate`, () => {
+        const impact = analyzeImpact({ config, sbis: [], files: files(path) });
+        assert.equal(impact.fullGate, false);
+        assert.deepEqual(impact.harnessModules, [path]);
+      });
+    }
+    it('when a module changes together with the config then triggers the Full Gate', () => {
+      assert.equal(analyzeImpact({ config, sbis: [], files: files('tools/harness/verifier.mjs', '.harness/config/harness.json') }).fullGate, true);
+    });
+    it('when a module changes on a pull request then the impact names the tests that import it', () => fixture(async root => {
+      // Joined, not a literal: a literal module path in this file would make this test select itself.
+      const module = `${['tools/harness', 'push-gate'].join('/')}.mjs`;
+      await git(root, ['switch', '--quiet', '-c', 'feature']);
+      await writeFile(join(root, module), `${await readFile(join(root, module), 'utf8')}\n`);
+      await git(root, ['commit', '--quiet', '-am', 'module']);
+      const { impact } = await loadImpact({ root, base: 'main' });
+      assert.equal(impact.fullGate, false);
+      assert.deepEqual(impact.harnessTests, ['tools/harness/push-gate.test.mjs']);
+    }));
     it('when an app alone changes then does not trigger the Full Gate', () => {
       assert.equal(analyzeImpact({ config, sbis: [], files: files(touched.admin, touched.api) }).fullGate, false);
     });
@@ -295,7 +315,8 @@ describe('Single verifier execution', () => {
 describe('CI Completion Judge', () => {
   // Production diffs need an SBI from an approved SBI Issue (#45), so the matrix and Full Gate cases carry one.
   const impact = analyzeImpact({ config, sbis: [sbi(['admin'])], files: files(touched.admin) });
-  const harnessImpact = analyzeImpact({ config, sbis: [sbi(['admin'])], files: files('tools/harness/verifier.mjs', touched.admin) });
+  const harnessImpact = analyzeImpact({ config, sbis: [sbi(['admin'])], files: files('.harness/config/harness.json', touched.admin) });
+  const moduleImpact = { ...analyzeImpact({ config, sbis: [sbi(['admin'])], files: files('tools/harness/verifier.mjs', touched.admin) }), harnessTests: ['tools/harness/verifier-phases.test.mjs'] };
   const docsImpact = analyzeImpact({ config, sbis: [], files: files('docs/architecture/README.md') });
   const needs = (verifiers, test = 'skipped', demo = 'skipped') => ({ impact: { result: 'success' }, verifiers: { result: verifiers }, 'harness-test': { result: test }, 'harness-demo': { result: demo } });
   const acceptance = { status: 'PASS', missing: [] };
@@ -329,6 +350,16 @@ describe('CI Completion Judge', () => {
 
     it('when Harness changes and the Full Gate was skipped then fails', () => {
       assert.equal(judged({ impact: harnessImpact, needs: needs('success'), acceptance }).status, 'FAIL');
+    });
+
+    it('when only a Harness module changes then requires the affected harness:test but not the demo', () => {
+      assert.equal(judged({ impact: moduleImpact, needs: needs('success', 'success'), acceptance }).status, 'PASS');
+      assert.equal(judged({ impact: moduleImpact, needs: needs('success'), acceptance }).status, 'FAIL');
+      assert.equal(judged({ impact: moduleImpact, needs: needs('success', 'failure'), acceptance }).status, 'FAIL');
+    });
+
+    it('when a Harness module changes but no test names it then requires no harness:test', () => {
+      assert.equal(judged({ impact: { ...moduleImpact, harnessTests: [] }, needs: needs('success'), acceptance }).status, 'PASS');
     });
 
     it('when Harness changes and both Full Gate jobs pass then passes', () => {
@@ -659,6 +690,17 @@ describe('CI workflow setup', () => {
     it('when a shard runs then its test file concurrency is set by the workflow, not inherited from the local default', () => {
       const step = job.steps.find(s => s.run === 'pnpm harness:test');
       assert.match(String(step.env.HARNESS_TEST_CONCURRENCY), /^[1-9]\d*$/);
+    });
+    it('when a pull request needs only the affected Harness tests then each shard runs that list, and the Full Gate runs every test', () => {
+      assert.match(job.if, /full_gate == 'true'/);
+      assert.match(job.if, /harness_tests != '\[\]'/);
+      const step = job.steps.find(s => s.run === 'pnpm harness:test');
+      assert.equal(step.env.HARNESS_TESTS, "${{ needs.impact.outputs.full_gate != 'true' && join(fromJson(needs.impact.outputs.harness_tests), ' ') || '' }}");
+      assert.match(JSON.stringify(workflow.jobs.impact.outputs), /harness_tests/);
+    });
+    it('when harness:test is given a list of test files then node runs only those, and without one it runs every glob', async () => {
+      const script = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).scripts['harness:test'];
+      assert.match(script, / \$\{HARNESS_TESTS:-tools\/harness\/\*\.test\.mjs [^}]+\}$/);
     });
     it('when harness:test runs with a shard then node runs only that shard of the full file list, and without one it runs everything', async () => {
       const script = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).scripts['harness:test'];

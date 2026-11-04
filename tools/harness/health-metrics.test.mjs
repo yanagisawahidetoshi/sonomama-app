@@ -210,6 +210,7 @@ describe('Health metrics signal collection', () => {
       ['Verifier mutated the source snapshot', 'WORKSPACE_CHANGED'], ['workspace is not an owned Git worktree', 'WORKSPACE_CHANGED'],
       ['Source must be clean; uncommitted inputs or source HEAD changed', 'SOURCE_CHANGED'], ['input snapshot changed', 'SOURCE_CHANGED'],
       ['config snapshot changed; start a new run', 'SOURCE_CHANGED'], ['trusted tool/skill snapshot changed', 'SOURCE_CHANGED'],
+      ['claude: timeout', 'PROVIDER_TIMEOUT'], ['codex: timeout', 'PROVIDER_TIMEOUT'], ['Agent/runtime error: claude: timeout', 'PROVIDER_TIMEOUT'],
       ['something nobody anticipated', 'UNKNOWN'],
     ];
     for (const [message, code] of cases) it(`when the message is "${message}" then classifies as ${code}`, () => assert.equal(classifyEscalation(message), code));

@@ -4,9 +4,9 @@
 
 | job | 内容 |
 | --- | --- |
-| `impact` | `pnpm harness:impact` でrequired verifierとFull Gateの要否を決め、理由をログに出す |
+| `impact` | `pnpm harness:impact` でrequired verifier、Full Gateの要否、影響範囲のHarnessテストを決め、理由をログに出す |
 | `verifiers` | required verifierごとのmatrix。`pnpm harness:verify --verifier <id>` を並列に実行する（`fail-fast: false`） |
-| `harness-test` / `harness-demo` | Full Gateのときだけ、`harness:test` と `harness:demo` を並列に実行する。実アプリVerifierまで回す `--full`（`HARNESS_DEMO_SCOPE`）はPR以外、つまりmainへのpushだけに付く |
+| `harness-test` / `harness-demo` | `harness-test`はFull Gateなら全件、Harnessモジュールだけの変更なら影響範囲のテスト（`HARNESS_TESTS`）をshardで実行する。`harness-demo`はFull Gateのときだけ実行する。実アプリVerifierまで回す `--full`（`HARNESS_DEMO_SCOPE`）はmainへのpushだけに付く |
 | `maestro` | `impact` の `maestro` が空でないときだけ、Android EmulatorでMaestroを実行する（下記）。mainへのpushではDevelopment BuildのAPK cacheだけを作る |
 | `harness` | Completion Judge。変更されたSBIのTrusted AcceptanceとSecurity Verifierを実行し、各jobの結果を集約する。必須チェック名なのでjob idを変えない |
 
@@ -17,7 +17,7 @@
 
 | job | 内容 |
 | --- | --- |
-| `judge` | mainをcheckoutし、PRのheadをcheckoutの外（`runner.temp/pr`）にdetached worktreeで置く。PRのものはinstallも実行もしない。`pnpm harness:judge --trusted`が、同じhead SHAの`pull_request` runが終わるまで待つ。impactをmainのコードで計算し直し、そのrunのjobs APIとartifactで判定する。secretも書き込み権限も持たない |
+| `judge` | mainをcheckoutし、PRのheadをcheckoutの外（`runner.temp/pr`）にdetached worktreeで置く。PRのものはinstallも実行もしない。Trusted AcceptanceがPRのコードをimportするときのbare importは、mainの`node_modules`からだけ解決する（PR側や上位ディレクトリへのfallbackなし、#295）。`pnpm harness:judge --trusted`が、同じhead SHAの`pull_request` runが終わるまで待つ。impactをmainのコードで計算し直し、そのrunのjobs APIとartifactで判定する。secretも書き込み権限も持たない |
 | `publish` | `checks: write`の`GITHUB_TOKEN`で、`judge`の結果をcheck runにする。checkoutもHarnessの実行もしない。`judge`が失敗・取消・skip・結果なしなら`failure`を出す |
 
 | 判定 | check run | 意味 |
@@ -102,7 +102,9 @@ Engineering Issueは起点の判定に使わない（[docs/workflows/engineering
 それ以外（`prototypes/`、docs、Harness本体など）だけを変更するPRはchange-typeを持たずSBIなしで通り、Verifierは差分だけで選ぶ。mainへのpushでもsource確認は行わない。
 判定理由はimpact jobとharness jobのログに出る。`Change type: engineering / SBI not required`か`Change type: ambiguous / SBI required (fail-closed)`の行に続けて、ファイルごとに当たったルール（`Change type rule <id>: <path>`）か、証明できなかった理由（`Change type ambiguous: <path> (<reason>)`）を出す。harness jobの `SBI source check:` 行にSBI sourceの結果が出て、検査に通ったときだけ`Source: SBI #<番号>`を出す。harness jobはIssueを読むため `issues: read` と `GH_TOKEN` を持つ。
 
-`impact.fullGate` のパス（`tools/harness/`、`.harness/config|verification|rules|skills/`、`.github/`、`.githooks/`、`AGENTS.md`、`.ai/`）が変わったときはFull Gateも実行する。
+`impact.fullGate` のパス（`tools/harness/`、`.harness/config|verification|rules|skills/`、`.github/`、`.githooks/`、`AGENTS.md`、`.ai/`）のうち、Harnessモジュール（`tools/harness/**/*.mjs`、`.harness/verification/**/*.mjs`）だけが変わったPRは、そのモジュールをimportするかパスとして名指しするテストだけを実行する（#288）。他のモジュール経由でしか届かないテストは選ばない。
+
+ただし、Harnessの流れを丸ごと動かすintegrationテストは、importではなく担当モジュールで選ぶ（#300）。integrationテストと担当モジュールの対応は`.harness/config/harness.json`の`harnessTests.integration`に宣言する。PRのCIは、そのテスト自身か担当モジュールが変わったときだけ実行し、`io.mjs`・`index.mjs`・`workspace.mjs`のような共通モジュールの変更では選ばない。宣言されていないテストはunitテストとして、importか名指しで選ぶ。宣言したテストか担当モジュールが存在しないときは、選択そのものを失敗させる。mainへのpushは全件を実行する。それ以外のパス（config・rules・workflow・hook・fixture等）が変わったときはFull Gateを実行する。
 `impact.toolchain` のパス（`.node-version`、`.tool-versions`、root の `package.json`、`pnpm-workspace.yaml`、`.npmrc`）が変わったときは、全Application VerifierとFull Gateを実行する。ログの理由は`toolchain:<path>`になる。workflowはこの判定の出力を使うだけで、pathを持たない。
 mainへのpushでは全Verifierを実行し、Full Gateも実行する。
 Full Gateの`harness-demo`は、PRでは`harness:demo`（fake providerの自己修復ループだけ）、mainへのpushでは`harness:demo --full`（lane内の全アプリVerifierをrun worktreeで再実行）になる。PRで約7分かかっていたのは`--full`の分で、ループ自体の検証には要らない（#192）。
@@ -113,7 +115,7 @@ Full Gateの`harness-demo`は、PRでは`harness:demo`（fake providerの自己�
 
 | 区分 | 内容 |
 | --- | --- |
-| Application | `verifiers` matrixと、Full Gateなら`harness-test` / `harness-demo`のjob結果 |
+| Application | `verifiers` matrixと、`harness-test`（Full Gateか影響範囲のテストがあるとき）・`harness-demo`（Full Gateのとき）のjob結果 |
 | Acceptance | 変更されたSBIのTrusted Acceptance（`trust: acceptance`）をjudge内で実行した結果。生成したTrusted Acceptanceは下記 |
 | Security | `classifySecurity()`がdiffとSBIから決めたrequired verifierを`verifySecurity()`で評価した結果。`alwaysRequiredVerifiers`（secret-scan・forbidden-pattern-check）は常に含む。`appliesTo`を持つ実装Verifierは、ルールに一致したファイルがその範囲に入るときだけ含む |
 
@@ -158,13 +160,13 @@ pnpm harness:verify --verifier admin --base origin/main
 
 ## pre-pushとの分担
 
-`.githooks/pre-push`は`harness:check`と`harness:push-gate`を呼ぶだけで、Verifierの一覧を持たない。`harness:push-gate`がgitから渡されたpush先のcommitをbaseに`harness:impact`と同じ判定を行い、required verifierを順に実行する。新しいbranchは`origin/main`と比べる。
+pre-pushは速いフィードバックだけを返す（#288）。`.githooks/pre-push`は`harness:check`と`harness:push-gate`を呼ぶだけで、Verifierの一覧を持たない。`harness:push-gate`はgitから渡されたpush先のcommitとの差分から、変更したHarnessのモジュール（`tools/harness/**/*.mjs`、`.harness/verification/**/*.mjs`）をimportするか、パスとして名指しするunitテストだけを実行する。integrationテスト（`harnessTests.integration`）は担当モジュールが変わってもpre-pushでは実行せず、CIに任せる（#300）。共通モジュール（`harnessTests.shared`、例：`io.mjs`）が変わったときは、それを名指しする全テストではなく、宣言した直接契約テストだけを実行する。CIは従来どおり、名指しするunitテストをすべて実行する。新しいbranchは`origin/main`と比べる。Verifier（Docker）、`harness:test`全件、`harness:demo`はpre-pushで実行せず、CIに任せる。
 
-検証はcheckoutのworking treeではなく、pushするcommitのdetached worktree（OSの一時ディレクトリ）で行う。未commitの修正でworking treeだけがPASSしても、壊れたcommitはpushできない。worktreeでは`pnpm install --frozen-lockfile --prefer-offline`を先に実行する。検証後は`git worktree remove`（forceなし）で消し、検証が未追跡ファイルを残して消せなかったときはパスをログに出して残す。
+テストはcheckoutのworking treeではなく、pushするcommitのdetached worktree（OSの一時ディレクトリ）で実行する。未commitの修正でworking treeだけがPASSしても、壊れたcommitはpushできない。worktreeでは`pnpm install --frozen-lockfile --prefer-offline`を先に実行する。実行後は`git worktree remove`（forceなし）で消し、テストが未追跡ファイルを残して消せなかったときはパスをログに出して残す。
 
-次の場合はFull Gateとして`harness:test`全件を実行する。
+次の場合はpre-pushでテストを選べないので、何も実行せずCIに任せる。
 
-- `impact.fullGate`か`impact.toolchain`のパスが変わった
-- 複数のrefを同時にpushした（pushするcommitごとに実行）、push先のcommitが手元に無い、比較するbaseが無い、refを読めない（HEADのcommitで実行）
+- `impact.fullGate`のうちモジュール以外のパス（config・rules・workflow・hook・`AGENTS.md`・fixture等）か、`impact.toolchain`のパスが変わった
+- 複数のrefを同時にpushした、push先のcommitが手元に無い、比較するbaseが無い、refを読めない
 
 hookはローカルの早期検出用で、回避できる。Production source・Trusted Acceptance・Security・`harness:demo`はCIのCompletion Judgeが最終判定する。

@@ -34,8 +34,10 @@ export function mergeDecision({ risk, checks, approvals = [], headSha, contextDi
   else if (!securityPassed(securityVerification) || (securityVerification.headSha && securityVerification.headSha !== headSha)) reasons.push('required_security_checks_not_passed');
   else if (github?.unavailable) reasons.push('github_state_unavailable');
   else if (github && (pull?.state !== 'open' || pull?.merged)) reasons.push('pull_request_not_open');
-  // The tested SHA is the merge result only while the base is still the run baseline (ADR-0001).
-  else if (github && (!baseline?.sha || pull?.baseRef !== baseline.ref || pull?.baseSha !== baseline.sha || pull?.remoteBaseSha !== baseline.sha)) reasons.push('base_not_baseline');
+  // ADR-0011 (#288): main advancing alone needs no sync; only another base branch or a conflict GitHub reports blocks. The push to main
+  // verifies the merged result.
+  else if (github && (!baseline?.ref || pull?.baseRef !== baseline.ref)) reasons.push('base_branch_mismatch');
+  else if (github && pull?.mergeable === false) reasons.push('merge_conflict');
   else if (github && (pull?.testedShaMatches !== true || pull?.headSha !== headSha)) reasons.push('tested_sha_mismatch');
   else if (github && github.ci?.status !== 'PASS') reasons.push('required_ci_not_passed');
   else if (rejected) { decision = 'REJECTED'; reasons.push(github ? 'github_changes_requested' : 'human_requested_changes'); }

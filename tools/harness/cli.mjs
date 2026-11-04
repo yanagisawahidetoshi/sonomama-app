@@ -18,6 +18,7 @@ import { postSpecApproval } from './spec-approval.mjs';
 import { githubCli } from './planner-github.mjs';
 import { git } from './workspace.mjs';
 import { appendFile } from 'node:fs/promises';
+import { availableParallelism } from 'node:os';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -143,7 +144,7 @@ try {
     if (command === 'impact') {
       const { impact } = await loadImpact({ root, base, all });
       for (const line of describeImpact(impact)) console.log(redactText(line));
-      await output([`required_verifiers=${JSON.stringify(impact.requiredVerifiers)}`, `full_gate=${impact.fullGate}`, `maestro=${JSON.stringify(impact.maestro)}`, `head_sha=${(await git(root, ['rev-parse', 'HEAD'])).stdout.trim()}`]);
+      await output([`required_verifiers=${JSON.stringify(impact.requiredVerifiers)}`, `full_gate=${impact.fullGate}`, `harness_tests=${JSON.stringify(impact.harnessTests)}`, `maestro=${JSON.stringify(impact.maestro)}`, `head_sha=${(await git(root, ['rev-parse', 'HEAD'])).stdout.trim()}`]);
     } else if (command === 'verify') {
       if (!options['--verifier']) throw new Error('verify requires --verifier ID');
       process.exitCode = await printVerifier({ base, all, id: options['--verifier'] }) ? 0 : 1;
@@ -183,12 +184,12 @@ try {
     // git hands the pushed refs to .githooks/pre-push on stdin; the hook passes them through HARNESS_PUSH_REFS.
     // The refs describe this push only; hook tests inside harness:test must not inherit them.
     const { HARNESS_PUSH_REFS: refs = '', ...env } = process.env;
-    const pnpm = (args, cwd) => spawnSync('pnpm', args, { cwd, stdio: 'inherit', env }).status === 0;
-    // Each check runs in the detached worktree of the pushed commit, which starts without node_modules.
+    const run = (command, args, cwd) => spawnSync(command, args, { cwd, stdio: 'inherit', env }).status === 0;
+    // The selected tests run in the detached worktree of the pushed commit, which starts without node_modules. Nothing else runs during a push,
+    // so they take half the cores (at least the 3 of harness:test): the selected test files took 400 s at 3 and 293 s at 6 on 12 cores.
     const result = await runPushGate({ root, refs, log: line => console.log(redactText(line)),
-      install: workspace => pnpm(['install', '--frozen-lockfile', '--prefer-offline'], workspace),
-      runFull: workspace => pnpm(['harness:test'], workspace),
-      verifyOne: async (id, base, workspace) => { process.env.HARNESS_BASE_REF = base; return printVerifier({ root: workspace, base, all: false, id }); } });
+      install: workspace => run('pnpm', ['install', '--frozen-lockfile', '--prefer-offline'], workspace),
+      runTests: (workspace, tests) => run(process.execPath, ['--test', `--test-concurrency=${env.HARNESS_TEST_CONCURRENCY || Math.max(3, Math.floor(availableParallelism() / 2))}`, ...tests], workspace) });
     process.exitCode = result.passed ? 0 : 1;
   } else if (command === 'pr') {
     if (!options['--run']) throw new Error('pr requires --run ID');

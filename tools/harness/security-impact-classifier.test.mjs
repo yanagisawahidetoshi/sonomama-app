@@ -858,3 +858,37 @@ describe('Security Impact Classifier on a public operation added to the OpenAPI 
     });
   });
 });
+
+describe('Security Impact Classifier on an authentication SDK added to a package manifest (ADR-0007)', () => {
+  for (const [path, added] of [
+    ['apps/admin/package.json', '    "aws-amplify": "^6.0.0",'],
+    ['apps/admin/package.json', '    "@aws-amplify/auth": "^6.0.0",'],
+    ['apps/mobile/package.json', '    "amazon-cognito-identity-js": "^6.3.0",'],
+    ['apps/mobile/package.json', '    "@aws-sdk/client-cognito-identity-provider": "^3.600.0",'],
+    ['apps/mobile/package.json', '    "expo-auth-session": "~7.0.0",'],
+    ['apps/admin/package.json', '    "@react-oauth/google": "^0.12.0",'],
+    ['apps/admin/package.json', '    "oidc-client-ts": "^3.0.0",'],
+    ['apps/api/Gemfile', 'gem "jwt"'],
+    ['apps/api/Gemfile', "gem 'omniauth', '~> 2.1'"],
+    ['apps/api/Gemfile', 'gem "aws-sdk-cognitoidentityprovider"'],
+  ]) {
+    it(`when ${path} adds ${added.trim()} then requires the pre-implementation gate at LEVEL 3 with two approvals`, () => {
+      const result = assess([{ path, status: 'M', added }]);
+      assert.ok(detected(result, 'SEC-AUTH-001'));
+      assert.equal(result.minimumRiskLevel, 3);
+      assert.equal(result.requiredHumanApprovals, 2);
+    });
+  }
+  for (const [name, path, added] of [
+    ['adds the author field', 'apps/admin/package.json', '  "author": "SONOMAMA",'],
+    ['adds a dependency unrelated to authentication', 'apps/mobile/package.json', '    "zod": "^4.1.0",'],
+    ['adds a gem unrelated to authentication', 'apps/api/Gemfile', 'gem "rack-cors"'],
+  ]) {
+    it(`when the manifest ${name} then does not match SEC-AUTH-001`, () => {
+      assert.equal(detected(assess([{ path, status: 'M', added }]), 'SEC-AUTH-001'), false);
+    });
+  }
+  it('when a document outside a package manifest names aws-amplify then does not match SEC-AUTH-001', () => {
+    assert.equal(detected(assess([{ path: 'docs/notes.md', status: 'M', added: 'aws-amplifyは後続SBIで検討する。' }]), 'SEC-AUTH-001'), false);
+  });
+});
