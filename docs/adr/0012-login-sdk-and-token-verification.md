@@ -22,7 +22,7 @@
 - 受講生アプリのログイン画面を、SONOMAMAのデザインで作れること
 - 管理画面のログイン画面の実装と保守を少なくすること
 - パスワードをSONOMAMAのアプリやAPIが扱わないこと
-- Cognito固有の実装を、各アプリの1か所に閉じ込めること
+- Cognito固有の実装を、各アプリとAPIの決まった場所に閉じること
 
 ## 選択肢
 
@@ -30,9 +30,9 @@
 | --- | --- |
 | Cognitoのログイン画面（Managed Login）へリダイレクトする | 受講生アプリの画面を独自のデザインにできない。管理画面だけ採ると、2つのアプリでログインの流れが分かれる |
 | AWS SDKでCognitoのAPIを直接呼ぶ | SRPの計算とトークンの更新を自前で実装することになる |
-| ログインをAPI経由にする（パスワードをAPIへ送る） | APIがパスワードを扱うことになり、ADR-0002の責務分担（認証情報はCognitoが扱う）に反する |
+| ログインをAPI経由にする（パスワードをAPIへ送る） | APIがパスワードを扱うことになり、判断ドライバーの「パスワードをSONOMAMAのアプリやAPIが扱わないこと」に反する |
 | APIでID Tokenを検証する | ID Tokenは本人の情報を伝えるためのもので、APIの呼び出しの許可には使わない（Cognitoの推奨もAccess Token） |
-| APIでCognito専用のgemを使う | apps/apiのREADMEが、Provider固有のgemを避けるとしている。検証項目は汎用のJWTライブラリで足りる |
+| APIでCognito専用のgemを使う | apps/apiのREADMEは、Provider固有のgemを承認なしに導入しないとしている。検証項目は汎用のJWTライブラリで足りる |
 
 ## 決定
 
@@ -55,7 +55,7 @@ APIの検証を汎用のライブラリで書けば、Cognitoに依存するの�
 ### Positive
 
 - パスワードはCognitoだけが扱い、アプリとAPIは受け取らない。
-- Cognito固有の実装が、各アプリの認証Provider・`features/auth`と、APIの検証の1か所に閉じる。
+- Cognito固有の実装が、各アプリの認証Provider・`features/auth`と、APIの検証処理に閉じる。
 
 ### Negative / Trade-offs
 

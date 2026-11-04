@@ -20,7 +20,7 @@
 
 - 認証基盤はCognito User Poolを使う（[ADR-0007](../adr/0007-aws-and-cognito.md)）。
 - ログインする人は、Cognitoとアプリケーションの両方にユーザーとして登録済みとする。登録の機能ができるまで、開発環境ではCognitoのコンソールかCLIでユーザーを作り、アプリケーションDBにはseedで同じユーザーを入れる。
-  作っただけのユーザーはパスワードの変更待ち（`FORCE_CHANGE_PASSWORD`）になり、このログインの流れでは入れない。`admin-set-user-password --permanent`でパスワードを確定させてから使う。
+  作っただけのユーザーはパスワードの変更待ち（`FORCE_CHANGE_PASSWORD`）になり、この設計のログインの流れではログインできない。`admin-set-user-password --permanent`でパスワードを確定させてから使う。
 - 自分でアカウントを作る画面（サインアップ）は作らない。
 
 ## 全体の構成
@@ -55,8 +55,8 @@ flowchart LR
 | 境界 | 扱うもの | 守り方 |
 | --- | --- | --- |
 | 利用者とCognito | パスワード | アプリはSRPでCognitoとやり取りし、パスワードをAPIへ送らない |
-| アプリの中 | Access Token・Refresh Token | 受講生アプリは暗号化された保存先を目指す（PoCで確認）。管理画面はXSSを防ぐ（各アプリの節） |
-| アプリとAPI | Access Token | APIが毎回署名と中身を検証する（「APIで検証すること」） |
+| アプリの中 | Access Token・Refresh Token | 受講生アプリは暗号化された保存先に置く方針で、置けるかはPoCで確かめる。管理画面はXSSを防ぐ（詳細は各アプリの節） |
+| アプリとAPI | Access Token | APIが毎回署名と中身を検証する（APIの節の「検証すること」） |
 | APIとアプリケーションDB | ユーザーの識別子（`sub`） | `auth_subject`で紐付ける。パスワードやトークンは保存しない |
 
 Cognitoへの外部接続は、アプリからのログインと、APIからの公開鍵（JWKS）の取得だけにする。
@@ -91,17 +91,17 @@ Cognitoへの外部接続は、アプリからのログインと、APIからの�
 | --- | --- |
 | `DONE` | `GET /api/v1/me`を呼び、成功したらホームへ進む |
 | `RESET_PASSWORD` | パスワード再設定の画面へ進む |
-| `CONFIRM_SIGN_IN_WITH_NEW_PASSWORD_REQUIRED` | 登録の手続きが終わっていないと表示する。この画面は作らない（初回の設定はユーザー登録で扱う） |
+| `CONFIRM_SIGN_IN_WITH_NEW_PASSWORD_REQUIRED` | 登録の手続きが終わっていないと表示する。新しいパスワードを設定する画面は作らない（初回の設定はユーザー登録で扱う） |
 | MFAなど上記以外 | 対応していないと表示し、ログインを終える |
 
 ### 開発環境
 
 Amplify AuthはExpo Goでは動かないため、Development Build（ネイティブ部分を含めたアプリを自分でビルドしたもの）を使う。TypeScriptの変更はこれまでどおりFast Refreshで反映し、ネイティブの依存を変えたときだけビルドし直す。
-Expo SDK 58との互換性は、最初の検証（PoC）で確かめる（未確認）。
+Expo SDK 58との互換性はまだ確かめていない。最初の検証（PoC）で確かめる。
 
 ### トークンの保存先
 
-Amplify AuthのReact Native版は、既定ではトークンをAsyncStorageに保存する（暗号化されない）。Expo SecureStoreに保存先を差し替えられるかを、PoCで確かめる（未確認）。
+Amplify AuthのReact Native版は、既定ではトークンをAsyncStorageに保存する（暗号化されない）。Expo SecureStoreに保存先を差し替えられるかはまだ確かめていない。PoCで確かめる。
 
 ## 管理画面（apps/admin）
 
@@ -112,11 +112,11 @@ AmplifyのWeb版は、既定ではトークンをブラウザのlocalStorageに�
 
 ## 両アプリに共通する作り
 
-- Amplifyをimportしてよいのは、`src/providers`の認証Provider（`Amplify.configure`とログイン状態の保持）と、`features/auth`（ログイン・パスワード再設定の画面）だけにする。ほかのFeatureや`shared`はAmplifyを知らない。
+- Amplifyをimportしてよいのは、`src/providers`の認証Provider（`Amplify.configure`とログイン状態の保持）と、`features/auth`（ログイン・パスワード再設定の画面）だけにする。ほかのFeatureや`shared`はAmplifyをimportしない。
 - APIへのトークンの付与は、`src/shared/api/http-client.ts`のAxios interceptorで行う。interceptorは「トークンを返す関数」を受け取るだけにし、その関数は`app`の層で認証Providerから渡す（`shared`は`providers`をimportできないため）。
 - interceptorは、リクエストのたびにAmplifyの`fetchAuthSession`でトークンを取る。期限が近ければAmplifyが更新する。
 - APIが401を返したら、トークンを強制的に更新して1回だけやり直す。それでも401なら、ログアウトしてログイン画面へ戻す。
-- 認証のテストは`features/auth`の下に置く（Harnessの認証テストがここを実行する）。認証Providerのテストも、`features/auth`から呼ぶ形でここに置く。
+- 認証のテストは`features/auth`の下に置く（Harnessの認証テストがここを実行する）。認証Providerのテストも`features/auth`の下に置く。
 
 ### ログアウト
 
@@ -161,7 +161,9 @@ AmplifyのWeb版は、既定ではトークンをブラウザのlocalStorageに�
 | トークンが正しくない、期限が切れている | 401 |
 | トークンは正しいが、アプリケーションDBにユーザーがいない | 403 |
 
-ユーザーがいないときに403とするのは、ログインし直しても解決しないため。エラーの本文の形はAPIの共通の仕様に合わせる。トークンやパスワードはログに出さない。
+ユーザーがいないときに403とするのは、ログインし直しても解決しないため。
+
+エラーの本文の形はAPIの共通の仕様に合わせる。トークンやパスワードはログに出さない。
 
 ### `GET /api/v1/me`
 
@@ -170,7 +172,6 @@ AmplifyのWeb版は、既定ではトークンをブラウザのlocalStorageに�
 ## テスト
 
 APIの認証テストは`apps/api/spec/authentication/`に置く（Harnessの認証テストがここを実行する）。
-
 
 | 対象 | 確かめること |
 | --- | --- |
@@ -190,7 +191,7 @@ APIの認証テストは`apps/api/spec/authentication/`に置く（Harnessの認
 - Access Tokenの有効期間（Cognitoの既定は60分）
 - 受講生アプリでトークンをSecureStoreに保存できるか（PoCで確認）
 - 管理画面でAmplify UIのデザインが許容されるか
-- ログインIDの形式、アカウント停止時の扱い、MFA（ユーザー登録・権限の設計で決める）
-- ログインIDの形式（メールアドレスをユーザー名にするか）はUser Poolを作ったあとに変えられない。PoCのdev環境のUser Poolは作り直す前提とし、stg・prodのUser Poolを作るまでにADR-0002の側で決める
+- ログインIDの形式（メールアドレスをユーザー名にするか）。User Poolを作ったあとには変えられないため、PoCのdev環境のUser Poolは作り直す前提とし、stg・prodのUser Poolを作るまでにADR-0002の側で決める
+- アカウント停止時の扱い、MFA（ユーザー登録・権限の設計で決める）
 
 関連ADR: [ADR-0007](../adr/0007-aws-and-cognito.md)、[ADR-0012](../adr/0012-login-sdk-and-token-verification.md)、[ADR-0002](../adr/0002-user-registration-and-invitation.md)
