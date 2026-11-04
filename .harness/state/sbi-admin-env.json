@@ -70,11 +70,6 @@
       "verifier": "admin-acceptance"
     },
     {
-      "id": "ADMIN-AC-14",
-      "description": "認証Provider固有ライブラリを導入していない",
-      "verifier": "admin-acceptance"
-    },
-    {
       "id": "ADMIN-AC-15",
       "description": "UI component libraryを勝手に固定していない",
       "verifier": "admin-acceptance"

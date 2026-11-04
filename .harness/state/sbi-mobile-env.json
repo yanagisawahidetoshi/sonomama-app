@@ -85,11 +85,6 @@
       "verifier": "mobile-acceptance"
     },
     {
-      "id": "MOBILE-AC-17",
-      "description": "認証Provider固有ライブラリを導入していない",
-      "verifier": "mobile-acceptance"
-    },
-    {
       "id": "MOBILE-AC-18",
       "description": "Push / storage / analytics等の未使用native libraryを導入していない",
       "verifier": "mobile-acceptance"
