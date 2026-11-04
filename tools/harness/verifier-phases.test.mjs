@@ -129,3 +129,21 @@ describe('Verifier setup configuration', () => {
     });
   });
 });
+
+describe('Verifier command evidence', () => {
+  describe('given several isolated verification commands', () => {
+    it('when the first command fails then records its exact argv, exit code and both streams and still runs the remaining checks', () => workspace(async root => {
+      const command = node('console.log("details on stdout"); console.error("summary on stderr"); process.exit(7)');
+      const following = touch('following-check-ran');
+      const result = await run(root, { commands: [command, following] });
+      assert.equal(result.status, 'FAIL');
+      assert.equal(result.failure, 'VERIFY_FAILED');
+      assert.deepEqual(result.processes[0].command, command);
+      assert.equal(result.processes[0].code, 7);
+      assert.match(result.processes[0].stdout, /details on stdout/);
+      assert.match(result.processes[0].stderr, /summary on stderr/);
+      assert.deepEqual(result.processes[1].command, following);
+      assert.equal(existsSync(join(root, 'following-check-ran')), true);
+    }));
+  });
+});
