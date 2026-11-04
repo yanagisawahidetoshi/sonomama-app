@@ -92,7 +92,7 @@ ACは組み込みsample-bddまたは`trust: "acceptance"`と`trustedScript`で�
 
 | adapter | 未生成判定marker | 接続状況 |
 | --- | --- | --- |
-| rails | apps/api/Gemfile | 接続済み: Docker Compose経由でbuild / db:prepare / RSpec / RuboCop / Brakeman / Bundler Audit / Zeitwerk。ACは`api-acceptance`。api-contractがRailsのroute manifestと契約のmethod + pathを照合する。request / response bodyの照合は未実装（[#99](https://github.com/yanagisawahidetoshi/sonomama-harness/issues/99)でSpike） |
+| rails | apps/api/Gemfile | 接続済み: Docker Compose経由でbuild / db:prepare / RSpec / RuboCop / Brakeman / Bundler Audit / Zeitwerk。ACは`api-acceptance`。api-contractがRailsのroute manifestと契約のmethod + pathを照合する。request / response bodyはrequest specの`match_api_contract`で照合する（[apps/api/README.md](../apps/api/README.md)） |
 | expo | apps/mobile/package.json | 接続済み: install / TypeScript / Biome / Jest + RNTL / expo-doctor（依存・native設定の変更時だけ）。ACは`mobile-acceptance`。Maestroはローカルのみ |
 | admin | apps/admin/package.json | 接続済み: install / TypeScript / Biome / Vitest + RTL / build。ACは`admin-acceptance` |
 
@@ -287,11 +287,11 @@ GitHub PR modeでは、実装後の承認はGitHub Reviewで判定し、`--phase
 PRを作らないLocal mode（`--provider fake`など）では、`harness:approve --run RUN_ID --phase merge`で実装後の承認を記録する。
 merge判定の条件は[.ai/workflows/pull-request.md](workflows/pull-request.md)。
 
-実装前承認は1人、実装後はRisk別の人数を要求する。承認待ちは連続失敗に数えない。
-実装前の仕様曖昧・未決の重要設計はESCALATED。agentが未宣言のHIGH変更を提案した場合も、
-適用前に停止してSBI更新と新しいゲートを要求する。
+実装後はRisk別の人数を要求する。承認待ちは連続失敗に数えない。
+仕様曖昧・未決の重要設計はESCALATED。agentが未宣言のHIGH変更を提案した場合も、
+適用前に停止してSBIの更新と再承認を要求する。
 実装・検証・レビューの失敗は既定3回、総iteration上限は5回。
-resumeは未着手のゲート待ちと実装DONE後の承認再評価だけに対応し、中断iterationの再開はしない。
+resumeは実装DONE後の承認再評価とRETRYABLEの再判定だけに対応し、中断iterationの再開はしない。
 
 ### ローカル承認の信頼境界
 
@@ -312,11 +312,10 @@ LEVEL 3を複数人で承認する本運用には、認証済みの別人を返�
 .harness/runs/<run-id>/
   inputs.json                   # SBI / 設定 / Rules / スキル / tool fingerprint
   summary.json                  # 3つの状態、HEAD、遷移履歴。判定の正本（schema検証・署名付き）
-  human-gate.json
   security-assessment.json      # impacts / rule IDs / Gate / 最低Risk / 必須検証
   security-verification.json    # 必須Security checksのPASS/FAIL/SKIP/NOT_CONFIGURED
   workspace-exclusions.json     # 互換用の空配列。trackedの秘密はcheckout前に停止
-  risk-preflight.json           # ゲート対象時
+  risk-preflight.json           # 実装前のRisk判定（全run）
   risk-assessment.json          # preflightかpost-executionかを明記
   changes.json                  # baseline → HEADの差分情報（実装後）
   approvals.json                # 署名付き台帳からの投影。承認の正本ではない
@@ -335,7 +334,7 @@ LEVEL 3を複数人で承認する本運用には、認証済みの別人を返�
     result.json
 ```
 
-未実行のフェーズはNOT_RUNとし、成功結果を捏造しない。ゲート待ちでも初期リスクと承認・マージ未評価を保存する。
+未実行のフェーズはNOT_RUNとし、成功結果を捏造しない。実装前にも初期リスクと承認・マージ未評価を保存する。
 Stateは.harness/state/runsにも保存する。resume時には同じrunを再評価する。
 
 判定の正本はsummary.json、署名付き承認台帳、inputs.json（inputsDigestで束縛）、workspace（headSha・workspaceDigestで束縛）だけ。
