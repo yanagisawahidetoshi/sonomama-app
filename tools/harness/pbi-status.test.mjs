@@ -8,10 +8,10 @@ import { renderSbiBody } from './planner.mjs';
 import { githubCli } from './planner-github.mjs';
 import { githubMock } from './test-github.mjs';
 import { execute } from './io.mjs';
-import { collectPbiStatus, renderPbiStatus, acceptPbi } from './pbi-status.mjs';
+import { collectPbiStatus, renderPbiStatus } from './pbi-status.mjs';
 // An adapter that has no evidence to offer, e.g. for an SBI without a merged Harness PR.
 const notConnected = { async read() { return { connected: false, reason: 'Maestro E2E Evidenceを接続できません' }; } };
-import { pbiAcceptanceRecords, evidenceManifests, pbiEvidenceLedgerPath } from './pbi-acceptance.mjs';
+import { evidenceManifests, pbiEvidenceLedgerPath, recordEvidenceManifest } from './pbi-acceptance.mjs';
 import { parseIssueUrl } from './planner.mjs';
 import { readFile as readText, writeFile as writeText } from 'node:fs/promises';
 import { planOf, planDigest, renderPlanSection, approvalKey } from './pbi-plan.mjs';
@@ -60,7 +60,7 @@ const passing = [{ id: 1, name: 'harness', status: 'completed', conclusion: 'suc
 
 function world(overrides = {}) {
   const state = {
-    pbi: { number: 8, title: pbi.title, body: 'PBI', html_url: pbi.url, state: 'open', labels: [{ name: 'plan-approved' }] },
+    pbi: { number: 8, title: pbi.title, body: 'PBI', html_url: pbi.url, state: 'closed', state_reason: 'completed', labels: [{ name: 'plan-approved' }] },
     issues: plannedSbis.map(s => sbiIssue(s)),
     pulls: { 21: mergedPull(11, 21, sha('1')), 22: mergedPull(12, 22, sha('2')) },
     timeline: { 11: [21], 12: [22], 13: [] },
@@ -107,12 +107,12 @@ async function status({ state: stateOverrides, evidence = connected(), records =
 const implementationOnlyIssues = plannedSbis.slice(0, 2).map(s => sbiIssue(s));
 
 describe('PBI Status: collecting the PBI from GitHub', () => {
-  describe('given a PBI whose SBIs merged, passed every required check and E2E, with an approved Human Acceptance and no open blocker', () => {
+  describe('given a PBI whose SBIs merged, passed every required check and E2E, with the PBI closed as completed and no open blocker', () => {
     it('when the status is collected then the PBI is DONE and every SBI is listed with its kind, Issue, PR and results', async () => {
       const result = await status();
       assert.equal(result.status, 'DONE', result.reasons.join('\n'));
       assert.deepEqual(result.reasons, []);
-      assert.deepEqual(result.pbi, { url: pbi.url, number: 8, title: pbi.title });
+      assert.deepEqual(result.pbi, { url: pbi.url, number: 8, title: pbi.title, state: 'closed', stateReason: 'completed' });
       assert.deepEqual(result.sbis.map(s => [s.id, s.kind, s.issueUrl, s.status]), [
         ['SBI-001', 'implementation', issueUrl(11), 'DONE'], ['SBI-002', 'implementation', issueUrl(12), 'DONE'], ['SBI-003', 'validation', issueUrl(13), 'DONE'],
       ]);
@@ -262,70 +262,37 @@ describe('PBI Status: Maestro E2E Evidence', () => {
   });
 });
 
-describe('PBI Status: Human Acceptance and the evidence digest', () => {
-  describe('given a PBI with a validation SBI', () => {
-    it('when nobody approved yet then the gate is PENDING, the PBI is ready for acceptance and the digest to approve is shown', async () => {
-      const result = await status({ records: [] });
-      assert.equal(result.status, 'NOT_DONE');
-      assert.equal(result.acceptance, 'PENDING');
-      assert.equal(result.ready, true);
-      assert.equal(result.evidenceDigest, acceptedDigest);
+describe('PBI Status: manual acceptance on GitHub', () => {
+  describe('given all SBI checks passed', () => {
+    it('when the PBI is closed as completed without any local acceptance ledger then it is DONE', async () => {
+      let ledgerRead = false;
+      const result = await status({ records: [], options: { acceptanceRecords: async () => { ledgerRead = true; throw new Error('obsolete ledger'); } } });
+      assert.equal(result.status, 'DONE', result.reasons.join('\n'));
+      assert.equal(result.acceptance, 'APPROVED');
+      assert.equal(ledgerRead, false);
     });
-    for (const [name, records] of [
-      ['the approval is for older evidence', [approval({ evidenceDigest: 'c'.repeat(64) })]],
-      ['the approver revoked it', [approval(), approval({ id: 'rec-2', decision: 'REVOKE' })]],
-      ['the approver requested changes', [approval(), approval({ id: 'rec-2', decision: 'REQUEST_CHANGES' })]],
-      ['the record is an agent JSON without a human identity', [approval({ kind: 'ai' })]],
-      ['the record is a merge approval', [approval({ purpose: 'merge' })]],
+    for (const [name, issue] of [
+      ['the PBI is open', { state: 'open', state_reason: null }],
+      ['the PBI is reopened', { state: 'open', state_reason: 'reopened' }],
+      ['the PBI is cancelled', { state: 'closed', state_reason: 'not_planned' }],
+      ['the completion reason is missing', { state: 'closed', state_reason: undefined }],
     ]) {
-      it(`when ${name} then the PBI is NOT_DONE`, async () => {
-        const result = await status({ records });
+      it(`when ${name} then it stays NOT_DONE even with an old signed approval`, async () => {
+        const { state } = world();
+        Object.assign(state.pbi, issue);
+        const result = await status({ state });
         assert.equal(result.status, 'NOT_DONE');
         assert.equal(result.acceptance, 'PENDING');
+        assert.equal(result.ready, true);
+        assert.match(result.reasons.join('\n'), /PBI.*完了として閉じ/);
       });
     }
-    it('when the acceptance ledger cannot be read then the PBI is NOT_DONE with the reason', async () => {
-      const { github, githubPr } = world();
-      const result = await collectPbiStatus({ root: '/nonexistent', pbiUrl: pbi.url, config, github, githubPr, evidence: connected(), acceptanceRecords: async () => { throw new Error('pbi-acceptance ledger signature invalid'); } });
-      assert.equal(result.status, 'NOT_DONE');
-      assert.match(result.reasons.join('\n'), /signature invalid/);
-    });
-  });
-
-  describe('given a PBI without a validation SBI', () => {
-    const merged = [
-      { sbi: 'SBI-001', issueUrl: issueUrl(11), pullRequest: 21, headSha: sha('1'), mergeCommitSha: sha('1'), e2e: { status: 'PASS', api: 'mock' }, e2eDigest: mockDigest('SBI-001') },
-      { sbi: 'SBI-002', issueUrl: issueUrl(12), pullRequest: 22, headSha: sha('2'), mergeCommitSha: sha('2'), e2e: { status: 'PASS', api: 'mock' }, e2eDigest: mockDigest('SBI-002') },
-    ];
-    const expected = pbiDigest(composition.slice(0, 2), merged, implementationOnlyPlan);
-    it('when every implementation SBI merged then the digest covers each SBI, its PR, the tested head, the merge commit, the E2E result and the digest of its Maestro result file', async () => {
+    it('when no validation SBI is needed then closing the PBI completes it without a dedicated command', async () => {
       const result = await status({ state: { issues: implementationOnlyIssues, plan: implementationOnlyPlan }, records: [] });
-      assert.equal(result.evidenceDigest, expected);
-      assert.equal(result.ready, true);
-    });
-    it('when the human approved that digest then the PBI is DONE', async () => {
-      const result = await status({ state: { issues: implementationOnlyIssues, plan: implementationOnlyPlan }, records: [approval({ evidenceDigest: expected })] });
       assert.equal(result.status, 'DONE', result.reasons.join('\n'));
     });
-    it('when a merge commit differs from the approved evidence then the digest changes and the PBI is NOT_DONE', async () => {
-      const { state } = world({ issues: implementationOnlyIssues, plan: implementationOnlyPlan });
-      state.pulls[22].merge_commit_sha = sha('9');
-      const result = await status({ state, records: [approval({ evidenceDigest: expected })] });
-      assert.notEqual(result.evidenceDigest, expected);
-      assert.equal(result.status, 'NOT_DONE');
-    });
-    it('when an implementation SBI is not merged then no digest is offered for approval', async () => {
-      const { state } = world({ issues: implementationOnlyIssues, plan: implementationOnlyPlan });
-      state.pulls[22].merged_at = null;
-      const result = await status({ state, records: [] });
-      assert.equal(result.evidenceDigest, null);
-      assert.equal(result.ready, false);
-    });
   });
-});
-
-describe('PBI Status: the SBI composition of the PBI', () => {
-  describe('given an SBI that the other SBIs depend on', () => {
+  describe('given a missing SBI in the approved plan', () => {
     for (const [name, change] of [
       ['its sbi label was removed', s => { s.issues[0].labels = [{ name: 'ready' }]; }],
       ['its Planner marker was removed from the body', s => { s.issues[0].body = s.issues[0].body.replace(/<!-- sonomama-sbi [^>]*-->/, ''); }],
@@ -340,17 +307,6 @@ describe('PBI Status: the SBI composition of the PBI', () => {
         assert.equal(result.ready, false);
       });
     }
-  });
-  describe('given an approval of the evidence digest', () => {
-    it('when another Issue now claims an SBI ID then the digest changes and the earlier APPROVE no longer counts', async () => {
-      const { state } = world();
-      state.issues[1] = sbiIssue(plannedSbis[1], { number: 15, html_url: issueUrl(15) });
-      state.timeline[15] = [22]; state.pulls[22].body = 'Closes #15'; state.commits[22] = ['feat: error\n\nSBI-Issue: https://github.com/acme/app/issues/15'];
-      const result = await status({ state });
-      assert.notEqual(result.evidenceDigest, acceptedDigest);
-      assert.equal(result.status, 'NOT_DONE');
-      assert.equal(result.acceptance, 'PENDING');
-    });
   });
 });
 
@@ -457,7 +413,9 @@ describe('PBI Status: GitHub failures fail closed', () => {
 describe('PBI Status: display', () => {
   describe('given a collected status', () => {
     it('when it is rendered then the PBI, its status, each SBI, Human Acceptance, blockers and the reasons are shown', async () => {
-      const text = renderPbiStatus(await status({ records: [] })).join('\n');
+      const { state } = world();
+      state.pbi.state = 'open'; state.pbi.state_reason = null;
+      const text = renderPbiStatus(await status({ state, records: [] })).join('\n');
       assert.match(text, /^PBI: #8 受講生ログイン$/m);
       assert.match(text, /^Status: NOT_DONE$/m);
       assert.match(text, /SBI-001 implementation .*#11.*merged.*verifier PASS.*E2E mock PASS/);
@@ -465,10 +423,11 @@ describe('PBI Status: display', () => {
       assert.match(text, /PBI plan\n✅ APPROVED \(plan-approved, digest [0-9a-f]{12}\)/);
       assert.match(text, /Human Acceptance\n.*PENDING/);
       assert.match(text, new RegExp(`Evidence digest: ${acceptedDigest}`));
-      assert.match(text, new RegExp(`pnpm harness:pbi-accept ${pbi.url} --evidence ${acceptedDigest}`));
+      assert.match(text, /GitHub.*PBI.*完了として閉じ/);
+      assert.doesNotMatch(text, /harness:pbi-accept|--evidence/);
       assert.match(text, /Blockers\n.*none/);
       assert.doesNotMatch(text, /[Bb]ug/);
-      assert.match(text, /Reason:\n- PBI Human Acceptance Gate/);
+      assert.match(text, /Reason:\n- PBI.*完了として閉じ/);
     });
     it('when the Maestro E2E Evidence is not connected then each SBI line says so instead of showing no E2E target', async () => {
       const text = renderPbiStatus(await status({ evidence: notConnected })).join('\n');
@@ -492,72 +451,6 @@ describe('PBI Status: display', () => {
   });
 });
 
-describe('PBI Acceptance from the trusted CLI', () => {
-  const human = async () => ({ id: 'os:501:reviewer', kind: 'human', source: 'local-os-user' });
-  async function withRoot(fn) {
-    const root = await mkdtemp(join(tmpdir(), 'harness-pbi-accept-'));
-    try { await fn(root); } finally { await rm(root, { recursive: true, force: true }); }
-  }
-  const accept = (root, options = {}, stateOverrides) => {
-    const { github, githubPr } = world(stateOverrides);
-    return acceptPbi({ root, pbiUrl: pbi.url, evidenceDigest: acceptedDigest, decision: 'APPROVE', identityProvider: human, config, github, githubPr, evidence: connected(), ...options });
-  };
-  describe('given a PBI whose SBIs are all done', () => {
-    it('when the human approves the shown evidence digest then the signed record makes the PBI DONE', () => withRoot(async root => {
-      const result = await accept(root);
-      assert.equal(result.record.decision, 'APPROVE');
-      assert.equal(result.status.status, 'DONE', result.status.reasons.join('\n'));
-      assert.equal((await pbiAcceptanceRecords(root, pbi.url)).length, 1);
-    }));
-    it('when the human approves a digest other than the current evidence then nothing is recorded', () => withRoot(async root => {
-      await assert.rejects(accept(root, { evidenceDigest: 'c'.repeat(64) }), /Evidence digest/);
-      assert.deepEqual(await pbiAcceptanceRecords(root, pbi.url), []);
-    }));
-    it('when the human revokes an approval then the PBI is NOT_DONE again', () => withRoot(async root => {
-      await accept(root);
-      const result = await accept(root, { decision: 'REVOKE' });
-      assert.equal(result.record.decision, 'REVOKE');
-      assert.equal(result.status.status, 'NOT_DONE');
-    }));
-  });
-  describe('given a PBI that is not ready for acceptance', () => {
-    it('when an SBI is not merged then APPROVE is not recorded', () => withRoot(async root => {
-      const { state } = world();
-      state.pulls[22].merged_at = null;
-      await assert.rejects(accept(root, {}, state), /まだ受け入れ確認できません/);
-      assert.deepEqual(await pbiAcceptanceRecords(root, pbi.url), []);
-    }));
-    it('when an Issue blocking the PBI (blocked by) is still open then APPROVE is not recorded even though every SBI is done', () => withRoot(async root => {
-      await assert.rejects(accept(root, {}, { blockedBy: [{ number: 40, title: 'ログインできない', body: null, html_url: issueUrl(40), state: 'open', labels: [] }] }), /まだ受け入れ確認できません[\s\S]*issues\/40/);
-      assert.deepEqual(await pbiAcceptanceRecords(root, pbi.url), []);
-    }));
-    it('when the blockers of the PBI cannot be read then APPROVE is not recorded', () => withRoot(async root => {
-      await assert.rejects(accept(root, {}, { fail: { blockedBy: true } }), /まだ受け入れ確認できません/);
-      assert.deepEqual(await pbiAcceptanceRecords(root, pbi.url), []);
-    }));
-    it('when every blocker is closed then APPROVE is recorded', () => withRoot(async root => {
-      const result = await accept(root, {}, { blockedBy: [{ number: 40, title: 'ログインできない', body: null, html_url: issueUrl(40), state: 'closed', labels: [] }] });
-      assert.equal(result.record.decision, 'APPROVE');
-      assert.equal(result.status.status, 'DONE', result.status.reasons.join('\n'));
-    }));
-    it('when GitHub cannot be read then APPROVE is not recorded', () => withRoot(async root => {
-      await assert.rejects(accept(root, {}, { fail: { list: true } }), /まだ受け入れ確認できません/);
-      assert.deepEqual(await pbiAcceptanceRecords(root, pbi.url), []);
-    }));
-    for (const decision of ['REQUEST_CHANGES', 'REVOKE']) {
-      it(`when the human records ${decision} then it is recorded so a withdrawal never waits for GitHub`, () => withRoot(async root => {
-        const result = await accept(root, { decision }, { fail: { list: true } });
-        assert.equal(result.record.decision, decision);
-        assert.equal(result.status.status, 'NOT_DONE');
-      }));
-      it(`when the human records ${decision} while a blocker is open then it is recorded`, () => withRoot(async root => {
-        const result = await accept(root, { decision }, { blockedBy: [{ number: 40, title: 'ログインできない', body: null, html_url: issueUrl(40), state: 'open', labels: [] }] });
-        assert.equal(result.record.decision, decision);
-      }));
-    }
-  });
-});
-
 describe('PBI Evidence manifest', () => {
   const human = async () => ({ id: 'os:501:reviewer', kind: 'human', source: 'local-os-user' });
   async function withRoot(fn) {
@@ -578,10 +471,14 @@ describe('PBI Evidence manifest', () => {
   const run = (root, { evidence = ci(), state, decision } = {}) => {
     const { github, githubPr } = world(state);
     const options = { root, pbiUrl: pbi.url, config, github, githubPr, evidence };
-    return decision ? acceptPbi({ ...options, evidenceDigest: acceptedDigest, decision, identityProvider: human }) : collectPbiStatus(options);
+    if (decision) return collectPbiStatus(options).then(async current => {
+      assert.equal(current.ready, true, current.reasons.join('\n'));
+      return recordEvidenceManifest({ root, pbiUrl: pbi.url, manifest: current.manifestDraft });
+    });
+    return collectPbiStatus(options);
   };
-  describe('given a human approving the PBI Human Acceptance', () => {
-    it('when APPROVE is recorded then a signed manifest of the verified evidence is stored with the plan, each SBI, its PR, SHAs, required checks, lane, result digest, run and artifact', () => withRoot(async root => {
+  describe('given an existing signed Evidence manifest', () => {
+    it('when a verified manifest is stored then a signed manifest of the verified evidence is stored with the plan, each SBI, its PR, SHAs, required checks, lane, result digest, run and artifact', () => withRoot(async root => {
       await run(root, { decision: 'APPROVE' });
       const [manifest] = await evidenceManifests(root, pbi.url);
       assert.equal(manifest.evidenceDigest, acceptedDigest);
@@ -594,14 +491,9 @@ describe('PBI Evidence manifest', () => {
       assert.equal(manifest.sbis[2].lane, 'real');
       assert.match(manifest.signature, /^[0-9a-f]{64}$/);
     }));
-    it('when the evidence cannot be verified from the raw artifact at APPROVE then APPROVE is refused and no manifest is stored', () => withRoot(async root => {
-      await assert.rejects(run(root, { decision: 'APPROVE', evidence: ci(new Set(['SBI-001'])) }), /まだ受け入れ確認できません/);
-      assert.deepEqual(await evidenceManifests(root, pbi.url), []);
-      assert.deepEqual(await pbiAcceptanceRecords(root, pbi.url), []);
-    }));
   });
   describe('given the raw artifact expired', () => {
-    it('when nobody approved yet then there is no manifest and the PBI is NOT_DONE', () => withRoot(async root => {
+    it('when there is no historical manifest and the PBI is NOT_DONE', () => withRoot(async root => {
       const result = await run(root, { evidence: ci(new Set(['SBI-001'])) });
       assert.equal(result.status, 'NOT_DONE');
       assert.match(result.reasons.join('\n'), /SBI-001.*期限切れ/);
@@ -640,11 +532,7 @@ describe('PBI Evidence manifest', () => {
       assert.equal(result.status, 'NOT_DONE');
       assert.match(result.reasons.join('\n'), /signature invalid/);
     }));
-    it('when the human re-approves while an artifact is available only through the manifest then APPROVE is refused', () => withRoot(async root => {
-      await run(root, { decision: 'APPROVE' });
-      await run(root, { decision: 'REVOKE' });
-      await assert.rejects(run(root, { decision: 'APPROVE', evidence: ci(new Set(['SBI-001'])) }), /まだ受け入れ確認できません/);
-    }));
+
   });
 });
 
@@ -661,25 +549,20 @@ describe('GitHub adapter for blocking Issues', () => {
 describe('PBI Status CLI', () => {
   const cli = new URL('./cli.mjs', import.meta.url).pathname;
   describe('given the commands offered to developers', () => {
-    it('when the package scripts are read then harness:pbi-status and harness:pbi-accept exist', async () => {
-      const { scripts } = JSON.parse(await (await import('node:fs/promises')).readFile(new URL('../../package.json', import.meta.url), 'utf8'));
+    it('when the package scripts are read then status remains available and no acceptance command is needed', async () => {
+      const { scripts } = JSON.parse(await readText(new URL('../../package.json', import.meta.url), 'utf8'));
       assert.equal(scripts['harness:pbi-status'], 'node tools/harness/cli.mjs pbi-status');
-      assert.equal(scripts['harness:pbi-accept'], 'node tools/harness/cli.mjs pbi-accept');
-      assert.equal(scripts['harness:pbi-plan'], 'node tools/harness/cli.mjs pbi-plan');
-      assert.equal(scripts['harness:pbi-plan-approve'], 'node tools/harness/cli.mjs pbi-plan-approve');
+      assert.equal(scripts['harness:pbi-accept'], undefined);
     });
-    it('when the usage is printed then both are user-facing commands', async () => {
+    it('when usage is printed then it offers status without a dedicated acceptance command', async () => {
       const { stderr } = await execute(process.execPath, [cli, 'unknown']);
-      const userFacing = stderr.indexOf('User-facing'), internal = stderr.indexOf('Internal/Maintenance');
-      for (const command of ['harness:pbi-status PBI_URL', 'harness:pbi-accept PBI_URL', 'harness:pbi-plan-approve PBI_URL']) {
-        const at = stderr.indexOf(`pnpm ${command}`);
-        assert.ok(at > userFacing && at < internal, `${command} is user-facing`);
-      }
+      assert.match(stderr, /pnpm harness:pbi-status PBI_URL/);
+      assert.doesNotMatch(stderr, /harness:pbi-accept/);
     });
-    it('when pbi-accept has no --evidence then it exits 1 without recording', async () => {
-      const result = await execute(process.execPath, [cli, 'pbi-accept', pbi.url, '--decision', 'approve']);
+    it('when the removed acceptance command is invoked then it cannot record an approval', async () => {
+      const result = await execute(process.execPath, [cli, 'pbi-accept', pbi.url]);
       assert.equal(result.code, 1);
-      assert.match(result.stderr, /--evidence/);
+      assert.match(result.stderr, /Usage:/);
     });
     it('when pbi-plan-approve has no PBI URL then it exits 1 without posting', async () => {
       const result = await execute(process.execPath, [cli, 'pbi-plan-approve']);
