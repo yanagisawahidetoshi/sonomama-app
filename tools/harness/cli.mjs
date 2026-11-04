@@ -1,4 +1,5 @@
 import { describePhases } from './isolation.mjs';
+import { verifierDiagnostics } from './verifier-output.mjs';
 import { fileURLToPath } from 'node:url';
 import { check, runHarness, resumeRun, cleanupRun, openPullRequest, approveRun, runExitCode, reverifyPullRequest } from './index.mjs';
 import { withEvidenceProtection, redactText } from './evidence-protection.mjs';
@@ -63,7 +64,7 @@ async function printVerifier({ root: workspace = root, base, all, id }) {
   const selection = impact.verifiers.find(v => v.id === id);
   console.log(redactText(`Selected by: ${selection ? selection.reasons.join(', ') : '(not selected by impact)'}`));
   for (const c of result.checks) {
-    for (const p of c.processes || (c.process ? [c.process] : [])) if (!p.ok) console.error(redactText((p.stderr || p.stdout || p.error || '').slice(-4000)));
+    for (const line of verifierDiagnostics(c)) console.error(line);
     console.log(redactText(`${c.id}: ${c.status}${c.reason ? ` (${c.reason})` : ''} [${c.selectionReasons.join(', ')}]${describePhases(c)}`));
   }
   return passed;
