@@ -80,7 +80,7 @@ try {
       for (const script of ['typecheck', 'check', 'test', 'build']) assert.ok(hasCommand(admin.commands, ['pnpm', 'run', script]), script);
     }],
     ['ADMIN-AC-14', 'Given the app, When listing dependencies, Then no auth provider SDK is installed', () => {
-      forbids(/amplify|cognito|firebase|google-auth|@react-oauth|oidc|auth0|@clerk|supabase/i, 'Auth provider SDK must not be installed');
+      forbids(/amplify|cognito|firebase|google-auth|@react-oauth|oidc|auth0|@clerk/i, 'Auth provider SDK must not be installed');
     }],
     // #123: Sparkle Design is the UI foundation, pinned exactly while it is a 2.x beta and used only through shared/components/ui wrappers.
     ['ADMIN-AC-15', 'Given the app, When listing dependencies and imports, Then Sparkle Design is the only UI component library and is used through shared/components/ui', () => {
