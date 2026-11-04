@@ -160,7 +160,7 @@ pnpm harness:verify --verifier admin --base origin/main
 
 ## pre-pushとの分担
 
-pre-pushは速いフィードバックだけを返す（#288）。`.githooks/pre-push`は`harness:check`と`harness:push-gate`を呼ぶだけで、Verifierの一覧を持たない。`harness:push-gate`はgitから渡されたpush先のcommitとの差分から、変更したHarnessのモジュール（`tools/harness/**/*.mjs`、`.harness/verification/**/*.mjs`）をimportするか、パスとして名指しするunitテストだけを実行する。integrationテスト（`harnessTests.integration`）は担当モジュールが変わってもpre-pushでは実行せず、CIに任せる（#300）。新しいbranchは`origin/main`と比べる。Verifier（Docker）、`harness:test`全件、`harness:demo`はpre-pushで実行せず、CIに任せる。
+pre-pushは速いフィードバックだけを返す（#288）。`.githooks/pre-push`は`harness:check`と`harness:push-gate`を呼ぶだけで、Verifierの一覧を持たない。`harness:push-gate`はgitから渡されたpush先のcommitとの差分から、変更したHarnessのモジュール（`tools/harness/**/*.mjs`、`.harness/verification/**/*.mjs`）をimportするか、パスとして名指しするunitテストだけを実行する。integrationテスト（`harnessTests.integration`）は担当モジュールが変わってもpre-pushでは実行せず、CIに任せる（#300）。共通モジュール（`harnessTests.shared`、例：`io.mjs`）が変わったときは、それを名指しする全テストではなく、宣言した直接契約テストだけを実行する。CIは従来どおり、名指しするunitテストをすべて実行する。新しいbranchは`origin/main`と比べる。Verifier（Docker）、`harness:test`全件、`harness:demo`はpre-pushで実行せず、CIに任せる。
 
 テストはcheckoutのworking treeではなく、pushするcommitのdetached worktree（OSの一時ディレクトリ）で実行する。未commitの修正でworking treeだけがPASSしても、壊れたcommitはpushできない。worktreeでは`pnpm install --frozen-lockfile --prefer-offline`を先に実行する。実行後は`git worktree remove`（forceなし）で消し、テストが未追跡ファイルを残して消せなかったときはパスをログに出して残す。
 

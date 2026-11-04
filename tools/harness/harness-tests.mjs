@@ -33,13 +33,16 @@ const exists = path => access(path).then(() => true, () => false);
 // (io.mjs, index.mjs, workspace.mjs) no longer pulls in every whole-flow test. pre-push runs no integration test; CI runs the selected ones.
 export async function selectHarnessTests({ root, config, files, stage = 'ci' }) {
   const { all, modules, reasons } = classifyHarnessChange({ config, files });
-  const integration = config.harnessTests?.integration ?? {};
+  const integration = config.harnessTests?.integration ?? {}, shared = config.harnessTests?.shared ?? {};
   // A stale declaration fails closed: a renamed test or owner would otherwise leave its flow untested until main.
   const missing = [];
-  for (const path of new Set(Object.entries(integration).flat(2))) if (!await exists(join(root, path))) missing.push(path);
-  if (missing.length) throw new Error(`Harness integration tests declared in .harness/config/harness.json do not exist: ${missing.join(', ')}`);
+  for (const path of new Set([...Object.entries(integration), ...Object.entries(shared)].flat(2))) if (!await exists(join(root, path))) missing.push(path);
+  if (missing.length) throw new Error(`Harness tests or modules declared in .harness/config/harness.json do not exist: ${missing.join(', ')}`);
   if (all || !modules.length) return { all, tests: [], reasons };
-  const changed = new Set(modules), tests = [];
+  // Before push, a shared module selects its contract tests instead of every test naming it; a changed test still selects itself.
+  const contracts = stage === 'pre-push' ? modules.filter(module => shared[module]) : [];
+  const changed = new Set(modules.filter(module => !contracts.includes(module))), tests = [];
+  const contractTests = new Set(contracts.flatMap(module => shared[module]));
   for (const test of await testFiles(root)) {
     if (integration[test]) {
       if (stage !== 'pre-push' && (changed.has(test) || integration[test].some(owner => changed.has(owner)))) tests.push(test);
@@ -47,7 +50,7 @@ export async function selectHarnessTests({ root, config, files, stage = 'ci' }) 
     }
     const dir = posix.dirname(test);
     const names = [...(await readFile(join(root, test), 'utf8')).matchAll(named)].flatMap(([, name]) => [posix.join(dir, name), posix.normalize(name)]);
-    if (changed.has(test) || names.some(name => changed.has(name))) tests.push(test);
+    if (contractTests.has(test) || changed.has(test) || names.some(name => changed.has(name))) tests.push(test);
   }
   return { all: false, tests: tests.sort(), reasons };
 }
