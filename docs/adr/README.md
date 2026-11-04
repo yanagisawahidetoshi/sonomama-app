@@ -2,6 +2,7 @@
 
 人間が承認した設計判断の一次情報を置く。主な読者は人間で、AIは重要な設計判断を確かめるときに参照する。
 新しいADRは[0000-template.md](0000-template.md)をコピーし、番号を1つ進めて作る。
+ADRには、決めたこと・採らなかった案・理由を書く。コマンド名・設定キー・理由コード・テストファイル名などの実装の詳細は書かず、実装とテストを正とする。実装が変わるたびにADRを直す必要が出ないようにするため。
 
 ## 状態
 
@@ -24,5 +25,5 @@
 
 ## Human Gate
 
-`docs/adr/`の変更は、新規作成・状態の変更・本文の修正を問わずレベル2になり、mergeに人1人のレビューが必要（`.harness/rules/security.json`のSEC-DESIGN-001、`pr-risk.json`の`adr`）。実装前の承認Gateは置かず、人はSBIまたはADRのPRで判断する（#175・#193）。異なる2人の承認は求めない（[ADR-0008](0008-default-risk-level-one.md)）。
+`docs/adr/`の変更は、新規作成・状態の変更・本文の修正を問わずレベル2になり、mergeに人1人のレビューが必要（`.harness/rules/security.json`のSEC-DESIGN-001、`pr-risk.json`の`adr`）。実装前の承認Gateは置かず、人はSBIまたはADRのPRで判断する（#175・#193）。異なる2人の承認は求めない（[ADR-0008: 既定Risk Level](0008-default-risk-level-one.md)）。
 本文が認証・認可・RLS・PIIなどに触れると、そのSecurity ruleにも当たり、レベル3・異なる2人以上の承認へ上がる（[docs/security/authorization.md](../security/authorization.md)）。
