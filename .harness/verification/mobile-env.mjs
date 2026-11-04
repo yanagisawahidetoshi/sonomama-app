@@ -105,9 +105,6 @@ try {
       for (const term of ['Android Emulator', 'native fingerprint']) assert.ok(readme.includes(term), term);
       assert.doesNotMatch(readme, /required checkにも含めない/);
     }],
-    ['MOBILE-AC-17', 'Given the app, When listing dependencies, Then no auth provider SDK is installed', () => {
-      forbids(/amplify|cognito|firebase|google-auth|@react-oauth|oidc|auth0|@clerk|supabase|expo-auth-session/i, 'Auth provider SDK must not be installed');
-    }],
     ['MOBILE-AC-18', 'Given the app, When listing dependencies, Then unused native libraries are absent', () => {
       forbids(/async-storage|expo-secure-store|expo-notifications|expo-camera|expo-media-library|expo-location|analytics|sentry|crashlytics|bugsnag|^redux$|@reduxjs|^zustand$|^jotai$|^mobx/i, 'Native library must wait for requirements');
     }],

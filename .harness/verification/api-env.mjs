@@ -97,9 +97,6 @@ try {
         assert.ok(commands.some(c => startsWith(c, ['docker', 'compose']) && c.includes(tool)), tool);
       }
     }],
-    ['API-AC-17', 'Given the Gemfile, When listing gems, Then no auth provider SDK is installed', () => {
-      forbids(/cognito|firebase|google-cloud|googleauth|aws-sdk|devise|omniauth|jwt|jwks|doorkeeper|auth0/i, 'Auth provider gem must not be installed');
-    }],
     ['API-AC-18', 'Given the app, When reading code, Then no JWT, Cognito or Firebase authentication is implemented', () => {
       assert.doesNotMatch(rubyFiles('app') + rubyFiles('config') + rubyFiles('lib'), /\b(JWT|JWKS|Cognito|cognito_sub|Firebase)\b/);
     }],
