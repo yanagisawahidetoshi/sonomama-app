@@ -3,7 +3,7 @@
 - 状態: Accepted（2026-10-30、柳沢英俊が承認）
 - 日付: 2026-10-30
 - 判断者: 柳沢英俊
-- 改訂: 2026-11-04、実装済みのfollow-up、ルールの詳細、実装と検証方法の列挙を削った（このPRのmergeで承認）
+- 改訂: 2026-11-04、実装済みのfollow-up、ルールの詳細、実装と検証方法の列挙を削った（PR #315のmergeで承認）
 - 関連Issue: なし
 - 関連SBI: なし
 - 関連Design Docs: [docs/workflows/engineering-changes.md](../workflows/engineering-changes.md)、[.ai/workflows/ci.md](../../.ai/workflows/ci.md)

@@ -5,7 +5,7 @@
 - 改訂: Accepted（PR #195 のマージで承認。2026-10-31、#175・#193の決定に合わせて実装前Gateの記述を改めた）
 - 判断者: 柳沢英俊
 - 関連SBI: Issue #15（GitHub PR Adapter）
-- 改訂: 2026-11-04、ADR-0011に置き換えられた「PRのbaseをrunのbaselineに固定する」部分と、実装の詳細を本文から削った（このPRのmergeで承認）
+- 改訂: 2026-11-04、ADR-0011に置き換えられた「PRのbaseをrunのbaselineに固定する」部分と、実装の詳細を本文から削った（PR #315のmergeで承認）
 - Superseded by: [ADR-0011](0011-no-main-sync-without-conflict.md)（mainが進んだときの扱いだけ）
 
 ## 背景
