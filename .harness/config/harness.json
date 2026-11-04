@@ -1215,7 +1215,8 @@
       "tools/harness/github-pr.test.mjs": [
         "tools/harness/github-pr.mjs",
         "tools/harness/merge-policy.mjs",
-        "tools/harness/test-github.mjs"
+        "tools/harness/test-github.mjs",
+        "tools/harness/test-github-pr.mjs"
       ],
       "tools/harness/reverify.test.mjs": [
         "tools/harness/reverify.mjs",
@@ -1268,6 +1269,58 @@
       ],
       "tools/harness/lanes.test.mjs": [
         "tools/harness/lanes.mjs"
+      ],
+      "tools/harness/github-pr-issue.test.mjs": [
+        "tools/harness/github-pr.mjs",
+        "tools/harness/merge-policy.mjs",
+        "tools/harness/test-github.mjs",
+        "tools/harness/test-github-pr.mjs"
+      ],
+      "tools/harness/github-pr-issue-approval.test.mjs": [
+        "tools/harness/github-pr.mjs",
+        "tools/harness/merge-policy.mjs",
+        "tools/harness/test-github.mjs",
+        "tools/harness/test-github-pr.mjs"
+      ],
+      "tools/harness/github-pr-issue-runs.test.mjs": [
+        "tools/harness/github-pr.mjs",
+        "tools/harness/merge-policy.mjs",
+        "tools/harness/test-github.mjs",
+        "tools/harness/test-github-pr.mjs"
+      ],
+      "tools/harness/github-pr-merge.test.mjs": [
+        "tools/harness/github-pr.mjs",
+        "tools/harness/merge-policy.mjs",
+        "tools/harness/test-github.mjs",
+        "tools/harness/test-github-pr.mjs"
+      ],
+      "tools/harness/github-pr-publish.test.mjs": [
+        "tools/harness/github-pr.mjs",
+        "tools/harness/merge-policy.mjs",
+        "tools/harness/test-github.mjs",
+        "tools/harness/test-github-pr.mjs"
+      ],
+      "tools/harness/reverify-github.test.mjs": [
+        "tools/harness/reverify.mjs",
+        "tools/harness/test-reverify.mjs"
+      ],
+      "tools/harness/reverify-pr.test.mjs": [
+        "tools/harness/reverify.mjs",
+        "tools/harness/test-reverify.mjs"
+      ],
+      "tools/harness/reverify-race.test.mjs": [
+        "tools/harness/reverify.mjs",
+        "tools/harness/test-reverify.mjs"
+      ],
+      "tools/harness/reverify-retry.test.mjs": [
+        "tools/harness/reverify.mjs",
+        "tools/harness/test-reverify.mjs"
+      ]
+    },
+    "shared": {
+      "tools/harness/io.mjs": [
+        "tools/harness/io-timeout.test.mjs",
+        "tools/harness/security-enforcement.test.mjs"
       ]
     }
   }
