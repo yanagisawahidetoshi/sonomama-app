@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { selectHarnessTests } from './harness-tests.mjs';
@@ -123,6 +123,16 @@ describe('Harness test selection by stage', () => {
       assert.ok(declared.length > 0);
       await selectHarnessTests({ root, config: repo, files: [{ path: 'tools/harness/io.mjs' }] });
       for (const [test] of declared) assert.match(await readFile(join(root, test), 'utf8'), /test-fixture\.mjs/, `${test} uses no Harness fixture`);
+    });
+    it('when a test drives a whole PR or re-verification flow through its shared helper then it is declared an integration test', async () => {
+      const root = new URL('../../', import.meta.url).pathname;
+      const repo = configSchema.parse(JSON.parse(await readFile(join(root, '.harness/config/harness.json'), 'utf8')));
+      const flows = [];
+      for (const file of await readdir(join(root, 'tools/harness'))) {
+        if (file.endsWith('.test.mjs') && /['"]\.\/test-(github-pr|reverify)\.mjs['"]/.test(await readFile(join(root, 'tools/harness', file), 'utf8'))) flows.push(`tools/harness/${file}`);
+      }
+      assert.ok(flows.length > 0);
+      assert.deepEqual(flows.filter(test => !repo.harnessTests.integration[test]), []);
     });
   });
 });
