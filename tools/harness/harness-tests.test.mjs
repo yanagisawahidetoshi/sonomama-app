@@ -146,3 +146,58 @@ describe('Harness integration test declaration', () => {
     });
   });
 });
+
+// Nearly every test imports a shared module (io.mjs) as a test tool, so naming it says little about what the test checks. Before push, a
+// change of a shared module runs only the tests declared as its direct contract; CI still runs every unit test naming it.
+describe('Harness test selection for a shared module', () => {
+  const shared = { ...config, harnessTests: { integration: {}, shared: { 'tools/harness/io.mjs': ['tools/harness/io.test.mjs'] } } };
+  const selectIn = (stage, root, ...paths) => selectHarnessTests({ root, config: shared, files: paths.map(path => ({ path })), stage });
+  describe('given a shared module declared with its direct contract tests', () => {
+    it('when it changes before push then pre-push runs only its contract tests', () => repository(async root => {
+      assert.deepEqual(await selectIn('pre-push', root, 'tools/harness/io.mjs'), { all: false, tests: ['tools/harness/io.test.mjs'], reasons: [] });
+    }));
+    it('when it changes in CI then every unit test naming it still runs', () => repository(async root => {
+      assert.deepEqual((await selectIn('ci', root, 'tools/harness/io.mjs')).tests, ['tools/harness/agents/provider.test.mjs', 'tools/harness/io.test.mjs']);
+    }));
+    it('when another module changes with it before push then the tests naming the other module still run', () => repository(async root => {
+      assert.deepEqual((await selectIn('pre-push', root, 'tools/harness/io.mjs', 'tools/harness/agents/provider.mjs')).tests, ['tools/harness/agents/provider.test.mjs', 'tools/harness/io.test.mjs']);
+    }));
+    it('when a test importing it changes itself before push then that test runs', () => repository(async root => {
+      assert.deepEqual((await selectIn('pre-push', root, 'tools/harness/io.mjs', 'tools/harness/agents/provider.test.mjs')).tests, ['tools/harness/agents/provider.test.mjs', 'tools/harness/io.test.mjs']);
+    }));
+  });
+  describe('given a shared declaration that no longer matches the tree', () => {
+    it('when the shared module does not exist then selection fails naming it', () => repository(async root => {
+      const stale = { ...config, harnessTests: { integration: {}, shared: { 'tools/harness/gone.mjs': ['tools/harness/io.test.mjs'] } } };
+      await assert.rejects(selectHarnessTests({ root, config: stale, files: [{ path: 'tools/harness/io.mjs' }], stage: 'pre-push' }), /tools\/harness\/gone\.mjs/);
+    }));
+    it('when a contract test does not exist then selection fails naming it', () => repository(async root => {
+      const stale = { ...config, harnessTests: { integration: {}, shared: { 'tools/harness/io.mjs': ['tools/harness/gone.test.mjs'] } } };
+      await assert.rejects(selectHarnessTests({ root, config: stale, files: [{ path: 'tools/harness/io.mjs' }], stage: 'pre-push' }), /tools\/harness\/gone\.test\.mjs/);
+    }));
+  });
+  describe('given the declaration in the configuration', () => {
+    const declare = async harnessTests => {
+      const root = new URL('../../', import.meta.url).pathname;
+      const repo = JSON.parse(await readFile(join(root, '.harness/config/harness.json'), 'utf8'));
+      return configSchema.safeParse({ ...repo, harnessTests }).success;
+    };
+    it('when a Harness module names unit tests in the test directories then the configuration is accepted', async () => {
+      assert.equal(await declare({ integration: {}, shared: { 'tools/harness/io.mjs': ['tools/harness/io-timeout.test.mjs'] } }), true);
+    });
+    it('when the shared module lies outside the Harness then the configuration is rejected', async () => {
+      assert.equal(await declare({ integration: {}, shared: { 'apps/admin/src/io.mjs': ['tools/harness/io-timeout.test.mjs'] } }), false);
+    });
+    it('when a contract test lies outside the test directories then the configuration is rejected', async () => {
+      assert.equal(await declare({ integration: {}, shared: { 'tools/harness/io.mjs': ['apps/admin/src/io.test.mjs'] } }), false);
+    });
+    it('when a contract test is an integration test then the configuration is rejected, because pre-push never runs it', async () => {
+      assert.equal(await declare({ integration: { 'tools/harness/run-store.test.mjs': ['tools/harness/run-store.mjs'] }, shared: { 'tools/harness/io.mjs': ['tools/harness/run-store.test.mjs'] } }), false);
+    });
+    it('when the repository declares io.mjs then its contract tests cover execute and the redaction of written evidence', async () => {
+      const root = new URL('../../', import.meta.url).pathname;
+      const repo = configSchema.parse(JSON.parse(await readFile(join(root, '.harness/config/harness.json'), 'utf8')));
+      assert.deepEqual(repo.harnessTests.shared['tools/harness/io.mjs'], ['tools/harness/io-timeout.test.mjs', 'tools/harness/security-enforcement.test.mjs']);
+    });
+  });
+});
