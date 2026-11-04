@@ -1,11 +1,9 @@
-import { pbiAcceptanceRecordSchema } from './schemas.mjs';
-
 // Deterministic PBI Completion Judge. Inputs come from trusted adapters, never from agent self-reports:
 // - sbis: [{ id, kind, dependsOn }] of one PBI. A validation SBI exists only when the PBI needs Integration / E2E.
 // - results[sbiId]: implementation → { merged, requiredVerifiers: 'PASS' | ..., e2e: null | { status, api } };
 //   validation → { e2e: { status, api }, evidenceDigest }. Missing means not run yet.
 // - evidenceDigest: without a validation SBI, the adapter's digest of the merged implementation evidence (e.g. merge commit SHAs).
-// - acceptanceRecords: PBI Human Acceptance Gate records from the identity adapter (purpose pbi-acceptance), bound to that evidence digest.
+// - pbiState / pbiStateReason: the GitHub Issue must be closed as completed after manual acceptance. No local approval command is required.
 // - blockers: [{ url, state }] the Issues the PBI is blocked by, of any label; anything but closed blocks it.
 const e2eApis = Object.freeze({ implementation: 'mock', validation: 'real' });
 export const e2eApi = kind => e2eApis[kind];
@@ -25,16 +23,7 @@ function validationStatus(id, result, reasons) {
   if (!/^[0-9a-f]{64}$/.test(result.evidenceDigest ?? '')) { reasons.push(`最終確認SBI ${id} のEvidence digestがありません`); return 'FAILED'; }
   return 'DONE';
 }
-function accepted(pbiUrl, evidenceDigest, records) {
-  const latest = new Map();
-  for (const raw of records) {
-    const parsed = pbiAcceptanceRecordSchema.safeParse(raw);
-    if (parsed.success && parsed.data.pbiUrl === pbiUrl) latest.set(parsed.data.reviewer, parsed.data);
-  }
-  return [...latest.values()].some(r => r.decision === 'APPROVE' && r.evidenceDigest === evidenceDigest);
-}
-
-function evaluate({ pbiUrl, sbis, results = {}, evidenceDigest, acceptanceRecords = [], blockers = [] }) {
+function evaluate({ pbiState, pbiStateReason, sbis, results = {}, blockers = [] }) {
   const reasons = [], status = {};
   const of = kind => sbis.filter(s => s.kind === kind);
   for (const sbi of of('implementation')) status[sbi.id] = implementationStatus(sbi.id, results[sbi.id], reasons);
@@ -45,10 +34,8 @@ function evaluate({ pbiUrl, sbis, results = {}, evidenceDigest, acceptanceRecord
   for (const sbi of sbis.filter(s => !(s.kind in e2eApis))) reasons.push(`SBI ${sbi.id} の種類 ${sbi.kind} は使えません`);
   // The human confirms the evidence of the whole PBI, so the gate opens only after every SBI is done.
   const ready = implementationsDone && validations.length <= 1 && validations.every(s => status[s.id] === 'DONE');
-  const digest = validations.length ? results[validations[0].id]?.evidenceDigest : evidenceDigest;
-  if (ready && !/^[0-9a-f]{64}$/.test(digest ?? '')) reasons.push('PBI Human Acceptance Gateで確認するEvidence digestがありません');
-  const acceptance = ready && accepted(pbiUrl, digest, acceptanceRecords) ? 'APPROVED' : 'PENDING';
-  if (acceptance !== 'APPROVED') reasons.push('PBI Human Acceptance Gateに、すべてのSBI完了後のEvidenceに対する人間の承認がありません');
+  const acceptance = ready && pbiState === 'closed' && pbiStateReason === 'completed' ? 'APPROVED' : 'PENDING';
+  if (acceptance !== 'APPROVED') reasons.push('PBIの動作確認結果をGitHubに記録し、PBI Issueを完了として閉じてください');
   for (const blocker of blockers) if (blocker.state !== 'closed') reasons.push(`未解決のblocker ${blocker.url} がPBIをブロックしています`);
   return { status, acceptance, reasons };
 }

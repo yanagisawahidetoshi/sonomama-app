@@ -1,6 +1,6 @@
 # 開発の流れ
 
-PBI（プロダクトバックログの項目）を受け取ってからmergeするまでの流れを示す。コマンドや判定条件の詳細はAI向けの.ai/workflows/にある。
+PBI（プロダクトバックログの項目）を受け取ってから、人間が動作確認して完了するまでの流れを示す。コマンドや判定条件の詳細はAI向けの.ai/workflows/にある。
 
 1. PBIを分ける: PBIをGitHub Issueに書き、AIに作業単位（SBI）へ分けさせる。分け方、受け入れ要件、セキュリティへの影響は人がレビューし、採用するSBIを決める。
 2. APIの仕様を決める: APIの変更を伴うPBIでは、OpenAPIを変更する専用のSBI（Schema SBI）が作られる。通常のSBIと同じく人がレビューして実行し、Prismでモックを確認したPRをmergeしてから、それに依存するSBIを始める。
@@ -8,6 +8,7 @@ PBI（プロダクトバックログの項目）を受け取ってからmergeす
 4. AIレビュー: 検証に通った変更は、リスクのレベルにかかわらずAIがレビューする。AIのレビューは人の承認の人数には数えない。
 5. PRをレビューする: 検証に通ったcommitをPRにし、人がGitHubでレビューする。必要な承認の人数は変更のリスクで決まり、レベル1は0人、レベル2は1人、レベル3は別々の2人以上になる。
 6. mergeする: Harnessが出すのは「mergeしてよい」という判定（MERGE_ALLOWED）と自動merge可否（autoMergeEligible）まで。レベル1で自動mergeできる判定のときだけ自動mergeしてよく、レベル2・3は人がmergeする。
+7. PBIの動作を確認する: 配下のSBIがすべて完了・merge済みになったら、人が確認環境で一連の操作を試す。確認した環境・コードの版・結果をPBIのコメントに残す。問題があれば修正SBIを追加し、問題がなければPBIを「完了」として閉じる。専用コマンドによる承認は不要。完了後に要件やSBIを追加・変更するときはPBIを再オープンし、実装後に再確認する。
 
 Production領域（apps/・packages/）の変更でSBIが要るかどうかは、diffの変更種別で決まる。すべてのファイルがEngineeringのルールに当たる技術変更は、SBIもIssueもなしでPRにできる（[Engineering Change](engineering-changes.md)）。Verifier・Security・Risk・Human Reviewは通常どおり行う。
 

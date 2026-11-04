@@ -235,7 +235,7 @@ export const approvalRecordSchema = z.strictObject({
   commitSha: z.string().regex(/^[0-9a-f]{40,64}$/), contextDigest: text, signature: text,
 });
 
-// The PBI Human Acceptance Gate is bound to the PBI and the evidence it confirms (validation evidence, or the merged implementation evidence).
+// Legacy signed PBI acceptance records. PBI completion now uses the GitHub Issue state, not this ledger.
 // It is separate from the SBI approval and merge records and never substitutes for them.
 export const pbiAcceptanceRecordSchema = z.strictObject({
   id: text, purpose: z.literal('pbi-acceptance'), pbiUrl: z.url(), reviewer: text, kind: z.literal('human'), identitySource: text,

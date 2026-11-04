@@ -22,10 +22,12 @@
 | implementation（実装SBI） | dependsOnのSBIが完了 | PRがmainへmerge済み、必須VerifierがPASS、E2E対象ならモックAPIのMaestro E2EがPASS |
 | validation（最終確認SBI、Integration / E2Eが必要なPBIだけ1件まで） | 同じPBIの実装SBIがすべて完了 | 実API / Rails / DBへ接続したMaestro E2EがPASS |
 
-人間確認はコード変更も実テストも持たないので、SBIにしない。PBI Human Acceptance Gateとして扱い、
-すべての実装SBIが完了し、最終確認SBIがあればPASSした後に、そのEvidence digestに対する人間の`pbi-acceptance`承認で通る。
-PBIは、すべてのSBIが完了し、PBI Human Acceptance Gateが承認され、PBIのblocker（GitHub issue dependenciesの`blocked by`）がすべてclosedのときだけ完了する。判定は`pbi-judge.mjs`の`judgePbi`で行う。
-`pbi-acceptance`はImplementation Gate・Merge Approvalとは別の承認で、どれの代わりにもならない。
+人間による結合確認はSBIにしない。すべての実装SBIが完了し、最終確認SBIがあればPASSした後に、人間が確認環境でPBIの受け入れ条件に沿って操作する。
+確認した環境・コードの版・結果をPBIのコメントに残し、問題がなければGitHubでPBI Issueを「完了」として閉じる。不具合があれば修正SBIを追加し、再確認する。
+専用の受け入れコマンド・ローカル承認台帳・承認用digestの入力は不要。AIは人間の代わりに受け入れ確認やPBIのクローズを行わない。
+PBIは、すべてのSBIが完了し、PBI Issueが`state: closed`かつ`state_reason: completed`で、blocker（GitHub issue dependenciesの`blocked by`）がすべてclosedのときだけ完了する。判定は`pbi-judge.mjs`の`judgePbi`で行う。
+PBIの再オープン・「対応しない」としてのクローズ・状態の取得失敗はNOT_DONE。完了後に要件やSBI構成を変える場合はPBIを再オープンし、実装後に人間が再確認して閉じる。
+人間による動作確認の実施やコメントの内容は機械判定しない。HarnessはGitHub上の完了状態を受け入れ確認の記録として扱う。SBIのCI・PRレビュー・マージ判定は引き続き必要。
 Maestroのlane（実装SBIはモックAPI、最終確認SBIは実API）とCompletion Judgeでの必須判定は[ci.md](ci.md)にある。
 
 ### PBI plan（PBIのSBI集合）
@@ -34,14 +36,13 @@ PBIのSBI集合の正本は、Plannerが書いた`## SBI構成`と、PBIの`plan
 `pnpm harness:pbi-plan-approve <PBI URL>`は、`## SBI構成`がGitHub上のSBI Issue（`sbi`ラベルとPlannerのmarker）と一致するときだけ、PBIに`plan-approved`ラベルを付ける。撤回は`--decision revoke`でラベルを外す。
 
 - digestは、PBI番号と、SBIごとのSBI ID・Issue番号・kind・依存（ID順に並べ、依存も並べる）のsha256。`harness:pbi-status`は、`## SBI構成`とGitHub上のSBI Issueが一致しなければラベルがあってもNOT_DONEにする。
-- revisionは、GitHubが保持するPBI本文の編集履歴（GraphQL `userContentEdits`）と現在の本文を古い順に並べ、`## SBI構成`の内容が変わった回数＋1。人は書かない。節の外の編集では変わらない。履歴から削除された版は中身を読めないので「変わった」と数える。approval key = sha256(`<digest>:<revision>`)。A → B → Aと戻すとrevisionは3になる。approval keyはPBI Human Acceptanceの署名付きmanifestに記録し、変わればmanifestは無効になる。
+- revisionは、GitHubが保持するPBI本文の編集履歴（GraphQL `userContentEdits`）と現在の本文を古い順に並べ、`## SBI構成`の内容が変わった回数＋1。人は書かない。節の外の編集では変わらない。履歴から削除された版は中身を読めないので「変わった」と数える。approval key = sha256(`<digest>:<revision>`)。A → B → Aと戻すとrevisionは3になる。approval keyは旧方式で作成したEvidence manifestの互換読み取りに使い、変わればそのmanifestは無効になる。
 - `## SBI構成`が無い既存のPBIは、`pnpm harness:pbi-plan <PBI URL>`でGitHub上のSBI IssueからPBI本文に書いてから承認する。Plannerは再実行しない。
 
 ### PBIの完了判定
 
 ```sh
 pnpm harness:pbi-status <PBI URL> [--json]
-pnpm harness:pbi-accept <PBI URL> --evidence <digest> [--decision approve|revoke|request-changes]
 ```
 
 `harness:pbi-status`は次を集めて`judgePbi`に渡し、`DONE` / `NOT_DONE`と理由を表示する（DONEはexit 0、NOT_DONEはexit 2）。`--json`は同じ結果をJSONで出す。
@@ -55,15 +56,14 @@ pnpm harness:pbi-accept <PBI URL> --evidence <digest> [--decision approve|revoke
 | kind・E2E対象 | merged PRのhead SHAに入っている `.harness/state/sbi-<N>.json`（CIがIssueとの一致を確かめたsnapshot）。Issueの`## 種類`と一致しなければNOT_DONE。E2E対象かどうかはImpact Analysisと同じ`maestroLanes`で決める |
 | E2E Evidence | merged head の `harness` checkが属するworkflow runの `maestro-results` artifact（`<lane>.json`）。実装SBIは`mock.json`、最終確認SBIは`real.json`だけを読む。lane・headSha・flow 1件以上・ログartifact 1件以上をCompletion Judgeと同じ条件で確かめる |
 | blocker | PBIのGitHub issue dependencies（blocked by）。labelは見ない。closedでないものが1件でもあればNOT_DONE |
-| Human Acceptance | `.harness/state/human/pbi-acceptance/`の署名付き台帳 |
+| Human Acceptance | GitHubのPBI Issueが`closed`かつ`state_reason: completed`であること。ローカル承認台帳は読まない |
 
-GitHub・Evidence・台帳のどれかを読めなければ、理由を出してNOT_DONEにする。
-Evidenceを読むのはmainへmergeされたHarness PRのCI runだけなので、最終確認SBIもHarness PRをmergeする必要がある。artifactの保存期限（90日）を過ぎても、APPROVE時のmanifestが有効な間はDONEのまま。
+GitHub・Evidenceを読めなければ、理由を出してNOT_DONEにする。
+Evidenceを読むのはmainへmergeされたHarness PRのCI runだけなので、最終確認SBIもHarness PRをmergeする必要がある。
 
-Evidence digestは、承認済みPBI planのdigest、SBIの構成（ID・Issue番号・kind）と、最終確認SBIがあればその`real.json`のsha256、なければ実装SBIごとのIssue・PR・head SHA・merge commit・E2E結果と`mock.json`のsha256をまとめたsha256。SBIを足す・外す・入れ替えると過去のAPPROVEは無効になる。
-すべてのSBIが完了すると`harness:pbi-status`がdigestと`harness:pbi-accept`のコマンドを表示する。人間はEvidenceを確認してから記録する。
-APPROVEはPBIの最終Gateなので、CIのraw artifactからEvidenceを検証できたときだけ記録し、同時に署名付きEvidence manifest（`.harness/state/human/pbi-evidence/`。plan digest / revision / approval key、SBIごとのID・Issue番号・kind・PR番号・head SHA・merge commit SHA・required checks・Maestro lane・結果ファイルのsha256・workflow run ID・artifact ID）を保存する。APPROVE後にartifactが消えた（期限切れ・一覧に無い・downloadがHTTP 404 / 410）SBIは、approval key・SBI構成・全SBIのPR / head / merge commitと、いま選ばれるworkflow run・artifactがmanifestと一致する間だけmanifestで判定する（表示は`(manifest)`）。通信障害・5xx・レート制限・認証切れ・展開失敗ではmanifestに切り替えずNOT_DONE。どれかが変わればmanifestは使わずNOT_DONE。承認前にartifactが無いときもNOT_DONE。PBI planが承認済みで、すべてのSBIが完了し（最終確認SBIがあればPASS）、Evidenceを読めて`--evidence`が現在のdigestと一致し、openのblockerが無いときだけ記録する。blockerを読めないときも記録しない。REQUEST_CHANGES / REVOKEはいつでも記録できる。
-人ごとに最新の判断を使い、現在のdigestに対するAPPROVEが1件あればGateを通る。`--reviewer`は無く、OSのユーザーが記録者になる。
+`harness:pbi-status`は任意の確認用コマンド。全SBIが完了していてPBIがopenなら、人間に動作確認結果の記録とPBIのクローズを案内する。GitHubへ書き込むことはない。
+Evidence digestは検証対象の識別用に表示するが、人間が承認のために入力する必要はない。`harness:pbi-accept`は廃止した。
+旧方式で保存済みの署名付きEvidence manifestは、artifactが期限切れになった場合の互換読み取りだけに使う。plan・SBI構成・PR・SHA・workflow run・artifactの一致と署名検証を維持する。旧受け入れ承認は完了の根拠にせず、PBIが再オープンされていればNOT_DONEにする。新しいmanifestは作成しない。
 
 ## SBI Issueの項目
 
